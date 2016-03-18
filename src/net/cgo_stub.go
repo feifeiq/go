@@ -1,10 +1,12 @@
-// Copyright 2011 The Go Authors.  All rights reserved.
+// Copyright 2011 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
 // +build !cgo netgo
 
 package net
+
+func init() { netGo = true }
 
 type addrinfoErrno int
 
@@ -26,4 +28,8 @@ func cgoLookupIP(name string) (addrs []IPAddr, err error, completed bool) {
 
 func cgoLookupCNAME(name string) (cname string, err error, completed bool) {
 	return "", nil, false
+}
+
+func cgoLookupPTR(addr string) (ptrs []string, err error, completed bool) {
+	return nil, nil, false
 }

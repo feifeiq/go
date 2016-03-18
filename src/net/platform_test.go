@@ -14,7 +14,8 @@ import (
 // testableNetwork reports whether network is testable on the current
 // platform configuration.
 func testableNetwork(network string) bool {
-	switch ss := strings.Split(network, ":"); ss[0] {
+	ss := strings.Split(network, ":")
+	switch ss[0] {
 	case "ip+nopriv":
 		switch runtime.GOOS {
 		case "nacl":
@@ -31,7 +32,7 @@ func testableNetwork(network string) bool {
 		}
 	case "unix", "unixgram":
 		switch runtime.GOOS {
-		case "nacl", "plan9", "windows":
+		case "android", "nacl", "plan9", "windows":
 			return false
 		}
 		// iOS does not support unix, unixgram.
@@ -40,9 +41,19 @@ func testableNetwork(network string) bool {
 		}
 	case "unixpacket":
 		switch runtime.GOOS {
-		case "android", "darwin", "nacl", "openbsd", "plan9", "windows":
+		case "android", "darwin", "nacl", "plan9", "windows":
 			fallthrough
 		case "freebsd": // FreeBSD 8 and below don't support unixpacket
+			return false
+		}
+	}
+	switch ss[0] {
+	case "tcp4", "udp4", "ip4":
+		if !supportsIPv4 {
+			return false
+		}
+	case "tcp6", "udp6", "ip6":
+		if !supportsIPv6 {
 			return false
 		}
 	}
@@ -103,16 +114,27 @@ func testableListenArgs(network, address, client string) bool {
 		return false
 	}
 
-	// Test functionality of IPv6 communication using AF_INET6
-	// sockets.
+	// Test functionality of IPv4 communication using AF_INET and
+	// IPv6 communication using AF_INET6 sockets.
+	if !supportsIPv4 && ip.To4() != nil {
+		return false
+	}
 	if !supportsIPv6 && ip.To16() != nil && ip.To4() == nil {
 		return false
+	}
+	cip := ParseIP(client)
+	if cip != nil {
+		if !supportsIPv4 && cip.To4() != nil {
+			return false
+		}
+		if !supportsIPv6 && cip.To16() != nil && cip.To4() == nil {
+			return false
+		}
 	}
 
 	// Test functionality of IPv4 communication using AF_INET6
 	// sockets.
-	cip := ParseIP(client)
-	if !supportsIPv4map && (network == "tcp" || network == "udp" || network == "ip") && wildcard {
+	if !supportsIPv4map && supportsIPv4 && (network == "tcp" || network == "udp" || network == "ip") && wildcard {
 		// At this point, we prefer IPv4 when ip is nil.
 		// See favoriteAddrFamily for further information.
 		if ip.To16() != nil && ip.To4() == nil && cip.To4() != nil { // a pair of IPv6 server and IPv4 client

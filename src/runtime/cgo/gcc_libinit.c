@@ -1,8 +1,9 @@
-// Copyright 2015 The Go Authors.  All rights reserved.
+// Copyright 2015 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-// +build darwin dragonfly freebsd linux netbsd
+// +build cgo
+// +build darwin dragonfly freebsd linux netbsd solaris
 // +build !ppc64,!ppc64le
 
 #include <pthread.h>
@@ -10,8 +11,8 @@
 #include <stdlib.h>
 #include <string.h> // strerror
 
-static pthread_cond_t runtime_init_cond;
-static pthread_mutex_t runtime_init_mu;
+static pthread_cond_t runtime_init_cond = PTHREAD_COND_INITIALIZER;
+static pthread_mutex_t runtime_init_mu = PTHREAD_MUTEX_INITIALIZER;
 static int runtime_init_done;
 
 void

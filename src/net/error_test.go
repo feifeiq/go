@@ -15,16 +15,6 @@ import (
 	"time"
 )
 
-func isTimeoutError(err error) bool {
-	nerr, ok := err.(Error)
-	return ok && nerr.Timeout()
-}
-
-func isTemporaryError(err error) bool {
-	nerr, ok := err.(Error)
-	return ok && nerr.Temporary()
-}
-
 func (e *OpError) isValid() error {
 	if e.Op == "" {
 		return fmt.Errorf("OpError.Op is empty: %v", e)
@@ -32,34 +22,39 @@ func (e *OpError) isValid() error {
 	if e.Net == "" {
 		return fmt.Errorf("OpError.Net is empty: %v", e)
 	}
-	switch addr := e.Addr.(type) {
-	case *TCPAddr:
-		if addr == nil {
-			return fmt.Errorf("OpError.Addr is empty: %v", e)
-		}
-	case *UDPAddr:
-		if addr == nil {
-			return fmt.Errorf("OpError.Addr is empty: %v", e)
-		}
-	case *IPAddr:
-		if addr == nil {
-			return fmt.Errorf("OpError.Addr is empty: %v", e)
-		}
-	case *IPNet:
-		if addr == nil {
-			return fmt.Errorf("OpError.Addr is empty: %v", e)
-		}
-	case *UnixAddr:
-		if addr == nil {
-			return fmt.Errorf("OpError.Addr is empty: %v", e)
-		}
-	case *pipeAddr:
-		if addr == nil {
-			return fmt.Errorf("OpError.Addr is empty: %v", e)
-		}
-	case fileAddr:
-		if addr == "" {
-			return fmt.Errorf("OpError.Addr is empty: %v", e)
+	for _, addr := range []Addr{e.Source, e.Addr} {
+		switch addr := addr.(type) {
+		case nil:
+		case *TCPAddr:
+			if addr == nil {
+				return fmt.Errorf("OpError.Source or Addr is non-nil interface: %#v, %v", addr, e)
+			}
+		case *UDPAddr:
+			if addr == nil {
+				return fmt.Errorf("OpError.Source or Addr is non-nil interface: %#v, %v", addr, e)
+			}
+		case *IPAddr:
+			if addr == nil {
+				return fmt.Errorf("OpError.Source or Addr is non-nil interface: %#v, %v", addr, e)
+			}
+		case *IPNet:
+			if addr == nil {
+				return fmt.Errorf("OpError.Source or Addr is non-nil interface: %#v, %v", addr, e)
+			}
+		case *UnixAddr:
+			if addr == nil {
+				return fmt.Errorf("OpError.Source or Addr is non-nil interface: %#v, %v", addr, e)
+			}
+		case *pipeAddr:
+			if addr == nil {
+				return fmt.Errorf("OpError.Source or Addr is non-nil interface: %#v, %v", addr, e)
+			}
+		case fileAddr:
+			if addr == "" {
+				return fmt.Errorf("OpError.Source or Addr is empty: %#v, %v", addr, e)
+			}
+		default:
+			return fmt.Errorf("OpError.Source or Addr is unknown type: %T, %v", addr, e)
 		}
 	}
 	if e.Err == nil {
@@ -93,15 +88,15 @@ second:
 	switch err := nestedErr.(type) {
 	case *AddrError, addrinfoErrno, *DNSError, InvalidAddrError, *ParseError, *timeoutError, UnknownNetworkError:
 		return nil
-	case *DNSConfigError:
+	case *os.SyscallError:
 		nestedErr = err.Err
 		goto third
-	case *os.SyscallError:
+	case *os.PathError: // for Plan 9
 		nestedErr = err.Err
 		goto third
 	}
 	switch nestedErr {
-	case errClosing, errMissingAddress:
+	case errCanceled, errClosing, errMissingAddress, errNoSuitableAddress:
 		return nil
 	}
 	return fmt.Errorf("unexpected type on 2nd nested level: %T", nestedErr)
@@ -124,8 +119,10 @@ var dialErrorTests = []struct {
 	{"tcp", "no-such-name:80"},
 	{"tcp", "mh/astro/r70:http"},
 
-	{"tcp", "127.0.0.1:0"},
-	{"udp", "127.0.0.1:0"},
+	{"tcp", JoinHostPort("127.0.0.1", "-1")},
+	{"tcp", JoinHostPort("127.0.0.1", "123456789")},
+	{"udp", JoinHostPort("127.0.0.1", "-1")},
+	{"udp", JoinHostPort("127.0.0.1", "123456789")},
 	{"ip:icmp", "127.0.0.1"},
 
 	{"unix", "/path/to/somewhere"},
@@ -153,15 +150,57 @@ func TestDialError(t *testing.T) {
 	for i, tt := range dialErrorTests {
 		c, err := d.Dial(tt.network, tt.address)
 		if err == nil {
-			t.Errorf("#%d: should fail; %s:%s->%s", i, tt.network, c.LocalAddr(), c.RemoteAddr())
+			t.Errorf("#%d: should fail; %s:%s->%s", i, c.LocalAddr().Network(), c.LocalAddr(), c.RemoteAddr())
 			c.Close()
 			continue
+		}
+		if tt.network == "tcp" || tt.network == "udp" {
+			nerr := err
+			if op, ok := nerr.(*OpError); ok {
+				nerr = op.Err
+			}
+			if sys, ok := nerr.(*os.SyscallError); ok {
+				nerr = sys.Err
+			}
+			if nerr == errOpNotSupported {
+				t.Errorf("#%d: should fail without %v; %s:%s->", i, nerr, tt.network, tt.address)
+				continue
+			}
 		}
 		if c != nil {
 			t.Errorf("Dial returned non-nil interface %T(%v) with err != nil", c, c)
 		}
 		if err = parseDialError(err); err != nil {
 			t.Errorf("#%d: %v", i, err)
+			continue
+		}
+	}
+}
+
+func TestProtocolDialError(t *testing.T) {
+	switch runtime.GOOS {
+	case "nacl", "solaris":
+		t.Skipf("not supported on %s", runtime.GOOS)
+	}
+
+	for _, network := range []string{"tcp", "udp", "ip:4294967296", "unix", "unixpacket", "unixgram"} {
+		var err error
+		switch network {
+		case "tcp":
+			_, err = DialTCP(network, nil, &TCPAddr{Port: 1 << 16})
+		case "udp":
+			_, err = DialUDP(network, nil, &UDPAddr{Port: 1 << 16})
+		case "ip:4294967296":
+			_, err = DialIP(network, nil, nil)
+		case "unix", "unixpacket", "unixgram":
+			_, err = DialUnix(network, nil, &UnixAddr{Name: "//"})
+		}
+		if err == nil {
+			t.Errorf("%s: should fail", network)
+			continue
+		}
+		if err = parseDialError(err); err != nil {
+			t.Errorf("%s: %v", network, err)
 			continue
 		}
 	}
@@ -177,7 +216,8 @@ var listenErrorTests = []struct {
 	{"tcp", "no-such-name:80"},
 	{"tcp", "mh/astro/r70:http"},
 
-	{"tcp", "127.0.0.1:0"},
+	{"tcp", JoinHostPort("127.0.0.1", "-1")},
+	{"tcp", JoinHostPort("127.0.0.1", "123456789")},
 
 	{"unix", "/path/to/somewhere"},
 	{"unixpacket", "/path/to/somewhere"},
@@ -202,9 +242,22 @@ func TestListenError(t *testing.T) {
 	for i, tt := range listenErrorTests {
 		ln, err := Listen(tt.network, tt.address)
 		if err == nil {
-			t.Errorf("#%d: should fail; %s:%s->", i, tt.network, ln.Addr())
+			t.Errorf("#%d: should fail; %s:%s->", i, ln.Addr().Network(), ln.Addr())
 			ln.Close()
 			continue
+		}
+		if tt.network == "tcp" {
+			nerr := err
+			if op, ok := nerr.(*OpError); ok {
+				nerr = op.Err
+			}
+			if sys, ok := nerr.(*os.SyscallError); ok {
+				nerr = sys.Err
+			}
+			if nerr == errOpNotSupported {
+				t.Errorf("#%d: should fail without %v; %s:%s->", i, nerr, tt.network, tt.address)
+				continue
+			}
 		}
 		if ln != nil {
 			t.Errorf("Listen returned non-nil interface %T(%v) with err != nil", ln, ln)
@@ -225,6 +278,9 @@ var listenPacketErrorTests = []struct {
 	{"udp", "127.0.0.1:☺"},
 	{"udp", "no-such-name:80"},
 	{"udp", "mh/astro/r70:http"},
+
+	{"udp", JoinHostPort("127.0.0.1", "-1")},
+	{"udp", JoinHostPort("127.0.0.1", "123456789")},
 }
 
 func TestListenPacketError(t *testing.T) {
@@ -242,7 +298,7 @@ func TestListenPacketError(t *testing.T) {
 	for i, tt := range listenPacketErrorTests {
 		c, err := ListenPacket(tt.network, tt.address)
 		if err == nil {
-			t.Errorf("#%d: should fail; %s:%s->", i, tt.network, c.LocalAddr())
+			t.Errorf("#%d: should fail; %s:%s->", i, c.LocalAddr().Network(), c.LocalAddr())
 			c.Close()
 			continue
 		}
@@ -251,6 +307,37 @@ func TestListenPacketError(t *testing.T) {
 		}
 		if err = parseDialError(err); err != nil {
 			t.Errorf("#%d: %v", i, err)
+			continue
+		}
+	}
+}
+
+func TestProtocolListenError(t *testing.T) {
+	switch runtime.GOOS {
+	case "nacl", "plan9":
+		t.Skipf("not supported on %s", runtime.GOOS)
+	}
+
+	for _, network := range []string{"tcp", "udp", "ip:4294967296", "unix", "unixpacket", "unixgram"} {
+		var err error
+		switch network {
+		case "tcp":
+			_, err = ListenTCP(network, &TCPAddr{Port: 1 << 16})
+		case "udp":
+			_, err = ListenUDP(network, &UDPAddr{Port: 1 << 16})
+		case "ip:4294967296":
+			_, err = ListenIP(network, nil)
+		case "unix", "unixpacket":
+			_, err = ListenUnix(network, &UnixAddr{Name: "//"})
+		case "unixgram":
+			_, err = ListenUnixgram(network, &UnixAddr{Name: "//"})
+		}
+		if err == nil {
+			t.Errorf("%s: should fail", network)
+			continue
+		}
+		if err = parseDialError(err); err != nil {
+			t.Errorf("%s: %v", network, err)
 			continue
 		}
 	}
@@ -324,15 +411,12 @@ second:
 	switch err := nestedErr.(type) {
 	case *AddrError, addrinfoErrno, *DNSError, InvalidAddrError, *ParseError, *timeoutError, UnknownNetworkError:
 		return nil
-	case *DNSConfigError:
-		nestedErr = err.Err
-		goto third
 	case *os.SyscallError:
 		nestedErr = err.Err
 		goto third
 	}
 	switch nestedErr {
-	case errClosing, errTimeout, ErrWriteToConnected, io.ErrUnexpectedEOF:
+	case errCanceled, errClosing, errMissingAddress, errTimeout, ErrWriteToConnected, io.ErrUnexpectedEOF:
 		return nil
 	}
 	return fmt.Errorf("unexpected type on 2nd nested level: %T", nestedErr)
@@ -462,6 +546,9 @@ second:
 	case *os.SyscallError:
 		nestedErr = err.Err
 		goto third
+	case *os.PathError: // for Plan 9
+		nestedErr = err.Err
+		goto third
 	}
 	switch nestedErr {
 	case errClosing, errTimeout:
@@ -488,7 +575,7 @@ func TestAcceptError(t *testing.T) {
 				if c != nil {
 					t.Errorf("Accept returned non-nil interface %T(%v) with err != nil", c, c)
 				}
-				if !isTimeoutError(err) && !isTemporaryError(err) {
+				if nerr, ok := err.(Error); !ok || (!nerr.Timeout() && !nerr.Temporary()) {
 					return
 				}
 				continue
@@ -542,6 +629,10 @@ second:
 		nestedErr = err.Err
 		goto third
 	}
+	switch nestedErr {
+	case errClosing:
+		return nil
+	}
 	return fmt.Errorf("unexpected type on 2nd nested level: %T", nestedErr)
 
 third:
@@ -554,13 +645,14 @@ third:
 func TestFileError(t *testing.T) {
 	switch runtime.GOOS {
 	case "windows":
-		t.Skip("not supported on %s", runtime.GOOS)
+		t.Skipf("not supported on %s", runtime.GOOS)
 	}
 
-	f, err := ioutil.TempFile("", "nettest")
+	f, err := ioutil.TempFile("", "go-nettest")
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer os.Remove(f.Name())
 	defer f.Close()
 
 	c, err := FileConn(f)

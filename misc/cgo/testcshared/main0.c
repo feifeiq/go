@@ -5,6 +5,9 @@
 #include <stdint.h>
 #include <stdio.h>
 
+#include "p.h"
+#include "libgo.h"
+
 // Tests libgo.so to export the following functions.
 //   int8_t DidInitRun();
 //   int8_t DidMainRun();

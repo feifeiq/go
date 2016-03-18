@@ -12,8 +12,6 @@
 
 package net
 
-import "errors"
-
 // IP address lengths (bytes).
 const (
 	IPv4len = 4
@@ -110,26 +108,23 @@ var (
 
 // IsUnspecified reports whether ip is an unspecified address.
 func (ip IP) IsUnspecified() bool {
-	if ip.Equal(IPv4zero) || ip.Equal(IPv6unspecified) {
-		return true
-	}
-	return false
+	return ip.Equal(IPv4zero) || ip.Equal(IPv6unspecified)
 }
 
 // IsLoopback reports whether ip is a loopback address.
 func (ip IP) IsLoopback() bool {
-	if ip4 := ip.To4(); ip4 != nil && ip4[0] == 127 {
-		return true
+	if ip4 := ip.To4(); ip4 != nil {
+		return ip4[0] == 127
 	}
 	return ip.Equal(IPv6loopback)
 }
 
 // IsMulticast reports whether ip is a multicast address.
 func (ip IP) IsMulticast() bool {
-	if ip4 := ip.To4(); ip4 != nil && ip4[0]&0xf0 == 0xe0 {
-		return true
+	if ip4 := ip.To4(); ip4 != nil {
+		return ip4[0]&0xf0 == 0xe0
 	}
-	return ip[0] == 0xff
+	return len(ip) == IPv6len && ip[0] == 0xff
 }
 
 // IsInterfaceLocalMulticast reports whether ip is
@@ -141,25 +136,27 @@ func (ip IP) IsInterfaceLocalMulticast() bool {
 // IsLinkLocalMulticast reports whether ip is a link-local
 // multicast address.
 func (ip IP) IsLinkLocalMulticast() bool {
-	if ip4 := ip.To4(); ip4 != nil && ip4[0] == 224 && ip4[1] == 0 && ip4[2] == 0 {
-		return true
+	if ip4 := ip.To4(); ip4 != nil {
+		return ip4[0] == 224 && ip4[1] == 0 && ip4[2] == 0
 	}
-	return ip[0] == 0xff && ip[1]&0x0f == 0x02
+	return len(ip) == IPv6len && ip[0] == 0xff && ip[1]&0x0f == 0x02
 }
 
 // IsLinkLocalUnicast reports whether ip is a link-local
 // unicast address.
 func (ip IP) IsLinkLocalUnicast() bool {
-	if ip4 := ip.To4(); ip4 != nil && ip4[0] == 169 && ip4[1] == 254 {
-		return true
+	if ip4 := ip.To4(); ip4 != nil {
+		return ip4[0] == 169 && ip4[1] == 254
 	}
-	return ip[0] == 0xfe && ip[1]&0xc0 == 0x80
+	return len(ip) == IPv6len && ip[0] == 0xfe && ip[1]&0xc0 == 0x80
 }
 
 // IsGlobalUnicast reports whether ip is a global unicast
 // address.
 func (ip IP) IsGlobalUnicast() bool {
-	return !ip.IsUnspecified() &&
+	return (len(ip) == IPv4len || len(ip) == IPv6len) &&
+		!ip.Equal(IPv4bcast) &&
+		!ip.IsUnspecified() &&
 		!ip.IsLoopback() &&
 		!ip.IsMulticast() &&
 		!ip.IsLinkLocalUnicast()
@@ -331,7 +328,7 @@ func (ip IP) MarshalText() ([]byte, error) {
 		return []byte(""), nil
 	}
 	if len(ip) != IPv4len && len(ip) != IPv6len {
-		return nil, errors.New("invalid IP address")
+		return nil, &AddrError{Err: "invalid IP address", Addr: ip.String()}
 	}
 	return []byte(ip.String()), nil
 }
@@ -346,7 +343,7 @@ func (ip *IP) UnmarshalText(text []byte) error {
 	s := string(text)
 	x := ParseIP(s)
 	if x == nil {
-		return &ParseError{"IP address", s}
+		return &ParseError{Type: "IP address", Text: s}
 	}
 	*ip = x
 	return nil
@@ -378,6 +375,10 @@ func bytesEqual(x, y []byte) bool {
 		}
 	}
 	return true
+}
+
+func (ip IP) matchAddrFamily(x IP) bool {
+	return ip.To4() != nil && x.To4() != nil || ip.To16() != nil && ip.To4() == nil && x.To16() != nil && x.To4() == nil
 }
 
 // If mask is a sequence of 1 bits followed by 0 bits,
@@ -633,16 +634,6 @@ func parseIPv6(s string, zoneAllowed bool) (ip IP, zone string) {
 	return ip, zone
 }
 
-// A ParseError represents a malformed text string and the type of string that was expected.
-type ParseError struct {
-	Type string
-	Text string
-}
-
-func (e *ParseError) Error() string {
-	return "invalid " + e.Type + ": " + e.Text
-}
-
 // ParseIP parses s as an IP address, returning the result.
 // The string s can be in dotted decimal ("74.125.19.99")
 // or IPv6 ("2001:4860:0:2001::68") form.
@@ -666,12 +657,12 @@ func ParseIP(s string) IP {
 // RFC 4632 and RFC 4291.
 //
 // It returns the IP address and the network implied by the IP
-// and mask.  For example, ParseCIDR("192.168.100.1/16") returns
+// and mask. For example, ParseCIDR("192.168.100.1/16") returns
 // the IP address 192.168.100.1 and the network 192.168.0.0/16.
 func ParseCIDR(s string) (IP, *IPNet, error) {
 	i := byteIndex(s, '/')
 	if i < 0 {
-		return nil, nil, &ParseError{"CIDR address", s}
+		return nil, nil, &ParseError{Type: "CIDR address", Text: s}
 	}
 	addr, mask := s[:i], s[i+1:]
 	iplen := IPv4len
@@ -682,7 +673,7 @@ func ParseCIDR(s string) (IP, *IPNet, error) {
 	}
 	n, i, ok := dtoi(mask, 0)
 	if ip == nil || !ok || i != len(mask) || n < 0 || n > 8*iplen {
-		return nil, nil, &ParseError{"CIDR address", s}
+		return nil, nil, &ParseError{Type: "CIDR address", Text: s}
 	}
 	m := CIDRMask(n, 8*iplen)
 	return ip, &IPNet{IP: ip.Mask(m), Mask: m}, nil

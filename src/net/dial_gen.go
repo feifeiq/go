@@ -1,4 +1,4 @@
-// Copyright 2012 The Go Authors.  All rights reserved.
+// Copyright 2012 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -17,7 +17,7 @@ func dialChannel(net string, ra Addr, dialer func(time.Time) (Conn, error), dead
 	}
 	timeout := deadline.Sub(time.Now())
 	if timeout <= 0 {
-		return nil, &OpError{Op: "dial", Net: net, Addr: ra, Err: errTimeout}
+		return nil, &OpError{Op: "dial", Net: net, Source: nil, Addr: ra, Err: errTimeout}
 	}
 	t := time.NewTimer(timeout)
 	defer t.Stop()
@@ -33,7 +33,7 @@ func dialChannel(net string, ra Addr, dialer func(time.Time) (Conn, error), dead
 	}()
 	select {
 	case <-t.C:
-		return nil, &OpError{Op: "dial", Net: net, Addr: ra, Err: errTimeout}
+		return nil, &OpError{Op: "dial", Net: net, Source: nil, Addr: ra, Err: errTimeout}
 	case racer := <-ch:
 		return racer.Conn, racer.error
 	}

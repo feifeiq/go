@@ -4,7 +4,10 @@
 
 package syscall
 
-const _SYS_dup = SYS_DUP3
+const (
+	_SYS_dup      = SYS_DUP3
+	_SYS_getdents = SYS_GETDENTS64
+)
 
 //sys	Fchown(fd int, uid int, gid int) (err error)
 //sys	Fstat(fd int, stat *Stat_t) (err error)
@@ -16,7 +19,6 @@ const _SYS_dup = SYS_DUP3
 //sysnb	Getgid() (gid int)
 //sysnb	Getrlimit(resource int, rlim *Rlimit) (err error)
 //sysnb	Getuid() (uid int)
-//sys	Lchown(path string, uid int, gid int) (err error)
 //sys	Listen(s int, n int) (err error)
 //sys	Pread(fd int, p []byte, offset int64) (n int, err error) = SYS_PREAD64
 //sys	Pwrite(fd int, p []byte, offset int64) (n int, err error) = SYS_PWRITE64
@@ -35,6 +37,10 @@ const _SYS_dup = SYS_DUP3
 
 func Stat(path string, stat *Stat_t) (err error) {
 	return Fstatat(_AT_FDCWD, path, stat, 0)
+}
+
+func Lchown(path string, uid int, gid int) (err error) {
+	return Fchownat(_AT_FDCWD, path, uid, gid, _AT_SYMLINK_NOFOLLOW)
 }
 
 func Lstat(path string, stat *Stat_t) (err error) {
@@ -124,11 +130,14 @@ func (cmsg *Cmsghdr) SetLen(length int) {
 	cmsg.Len = uint64(length)
 }
 
+func InotifyInit() (fd int, err error) {
+	return InotifyInit1(0)
+}
+
 // TODO(dfc): constants that should be in zsysnum_linux_arm64.go, remove
 // these when the deprecated syscalls that the syscall package relies on
 // are removed.
 const (
-	SYS_INOTIFY_INIT = 1043
 	SYS_GETPGRP      = 1060
 	SYS_UTIMES       = 1037
 	SYS_FUTIMESAT    = 1066

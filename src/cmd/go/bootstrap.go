@@ -1,4 +1,4 @@
-// Copyright 2012 The Go Authors.  All rights reserved.
+// Copyright 2012 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -29,7 +29,7 @@ func httpGET(url string) ([]byte, error) {
 	return nil, errHTTP
 }
 
-func httpsOrHTTP(importPath string) (string, io.ReadCloser, error) {
+func httpsOrHTTP(importPath string, security securityMode) (string, io.ReadCloser, error) {
 	return "", nil, errHTTP
 }
 

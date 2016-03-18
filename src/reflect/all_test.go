@@ -10,6 +10,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"math/rand"
 	"os"
 	. "reflect"
@@ -647,6 +648,8 @@ var (
 	fn3 = func() { fn1() } // Not nil.
 )
 
+type self struct{}
+
 var deepEqualTests = []DeepEqualTest{
 	// Equalities
 	{nil, nil, true},
@@ -681,6 +684,13 @@ var deepEqualTests = []DeepEqualTest{
 	{fn1, fn3, false},
 	{fn3, fn3, false},
 	{[][]int{{1}}, [][]int{{2}}, false},
+	{math.NaN(), math.NaN(), false},
+	{&[1]float64{math.NaN()}, &[1]float64{math.NaN()}, false},
+	{&[1]float64{math.NaN()}, self{}, true},
+	{[]float64{math.NaN()}, []float64{math.NaN()}, false},
+	{[]float64{math.NaN()}, self{}, true},
+	{map[float64]float64{math.NaN(): 1}, map[float64]float64{1: 2}, false},
+	{map[float64]float64{math.NaN(): 1}, self{}, true},
 
 	// Nil vs empty: not the same.
 	{[]int{}, []int(nil), false},
@@ -702,6 +712,9 @@ var deepEqualTests = []DeepEqualTest{
 
 func TestDeepEqual(t *testing.T) {
 	for _, test := range deepEqualTests {
+		if test.b == (self{}) {
+			test.b = test.a
+		}
 		if r := DeepEqual(test.a, test.b); r != test.eq {
 			t.Errorf("DeepEqual(%v, %v) = %v, want %v", test.a, test.b, r, test.eq)
 		}
@@ -1382,7 +1395,7 @@ func selectWatcher() {
 	for {
 		time.Sleep(1 * time.Second)
 		selectWatch.Lock()
-		if selectWatch.info != nil && time.Since(selectWatch.now) > 1*time.Second {
+		if selectWatch.info != nil && time.Since(selectWatch.now) > 10*time.Second {
 			fmt.Fprintf(os.Stderr, "TestSelect:\n%s blocked indefinitely\n", fmtSelect(selectWatch.info))
 			panic("select stuck")
 		}
@@ -2397,6 +2410,17 @@ func TestEmbeddedMethods(t *testing.T) {
 	}
 }
 
+type FuncDDD func(...interface{}) error
+
+func (f FuncDDD) M() {}
+
+func TestNumMethodOnDDD(t *testing.T) {
+	rv := ValueOf((FuncDDD)(nil))
+	if n := rv.NumMethod(); n != 1 {
+		t.Fatalf("NumMethod()=%d, want 1", n)
+	}
+}
+
 func TestPtrTo(t *testing.T) {
 	var i int
 
@@ -2776,14 +2800,27 @@ func TestSetBytes(t *testing.T) {
 type Private struct {
 	x int
 	y **int
+	Z int
 }
 
 func (p *Private) m() {
 }
 
+type private struct {
+	Z int
+	z int
+	S string
+	A [1]Private
+	T []Private
+}
+
+func (p *private) P() {
+}
+
 type Public struct {
 	X int
 	Y **int
+	private
 }
 
 func (p *Public) M() {
@@ -2791,17 +2828,30 @@ func (p *Public) M() {
 
 func TestUnexported(t *testing.T) {
 	var pub Public
+	pub.S = "S"
+	pub.T = pub.A[:]
 	v := ValueOf(&pub)
 	isValid(v.Elem().Field(0))
 	isValid(v.Elem().Field(1))
+	isValid(v.Elem().Field(2))
 	isValid(v.Elem().FieldByName("X"))
 	isValid(v.Elem().FieldByName("Y"))
+	isValid(v.Elem().FieldByName("Z"))
 	isValid(v.Type().Method(0).Func)
+	m, _ := v.Type().MethodByName("M")
+	isValid(m.Func)
+	m, _ = v.Type().MethodByName("P")
+	isValid(m.Func)
 	isNonNil(v.Elem().Field(0).Interface())
 	isNonNil(v.Elem().Field(1).Interface())
+	isNonNil(v.Elem().Field(2).Field(2).Index(0))
 	isNonNil(v.Elem().FieldByName("X").Interface())
 	isNonNil(v.Elem().FieldByName("Y").Interface())
+	isNonNil(v.Elem().FieldByName("Z").Interface())
+	isNonNil(v.Elem().FieldByName("S").Index(0).Interface())
 	isNonNil(v.Type().Method(0).Func.Interface())
+	m, _ = v.Type().MethodByName("P")
+	isNonNil(m.Func.Interface())
 
 	var priv Private
 	v = ValueOf(&priv)
@@ -2815,6 +2865,170 @@ func TestUnexported(t *testing.T) {
 	shouldPanic(func() { v.Elem().FieldByName("x").Interface() })
 	shouldPanic(func() { v.Elem().FieldByName("y").Interface() })
 	shouldPanic(func() { v.Type().Method(0).Func.Interface() })
+}
+
+func TestSetPanic(t *testing.T) {
+	ok := func(f func()) { f() }
+	bad := shouldPanic
+	clear := func(v Value) { v.Set(Zero(v.Type())) }
+
+	type t0 struct {
+		W int
+	}
+
+	type t1 struct {
+		Y int
+		t0
+	}
+
+	type T2 struct {
+		Z       int
+		namedT0 t0
+	}
+
+	type T struct {
+		X int
+		t1
+		T2
+		NamedT1 t1
+		NamedT2 T2
+		namedT1 t1
+		namedT2 T2
+	}
+
+	// not addressable
+	v := ValueOf(T{})
+	bad(func() { clear(v.Field(0)) })                   // .X
+	bad(func() { clear(v.Field(1)) })                   // .t1
+	bad(func() { clear(v.Field(1).Field(0)) })          // .t1.Y
+	bad(func() { clear(v.Field(1).Field(1)) })          // .t1.t0
+	bad(func() { clear(v.Field(1).Field(1).Field(0)) }) // .t1.t0.W
+	bad(func() { clear(v.Field(2)) })                   // .T2
+	bad(func() { clear(v.Field(2).Field(0)) })          // .T2.Z
+	bad(func() { clear(v.Field(2).Field(1)) })          // .T2.namedT0
+	bad(func() { clear(v.Field(2).Field(1).Field(0)) }) // .T2.namedT0.W
+	bad(func() { clear(v.Field(3)) })                   // .NamedT1
+	bad(func() { clear(v.Field(3).Field(0)) })          // .NamedT1.Y
+	bad(func() { clear(v.Field(3).Field(1)) })          // .NamedT1.t0
+	bad(func() { clear(v.Field(3).Field(1).Field(0)) }) // .NamedT1.t0.W
+	bad(func() { clear(v.Field(4)) })                   // .NamedT2
+	bad(func() { clear(v.Field(4).Field(0)) })          // .NamedT2.Z
+	bad(func() { clear(v.Field(4).Field(1)) })          // .NamedT2.namedT0
+	bad(func() { clear(v.Field(4).Field(1).Field(0)) }) // .NamedT2.namedT0.W
+	bad(func() { clear(v.Field(5)) })                   // .namedT1
+	bad(func() { clear(v.Field(5).Field(0)) })          // .namedT1.Y
+	bad(func() { clear(v.Field(5).Field(1)) })          // .namedT1.t0
+	bad(func() { clear(v.Field(5).Field(1).Field(0)) }) // .namedT1.t0.W
+	bad(func() { clear(v.Field(6)) })                   // .namedT2
+	bad(func() { clear(v.Field(6).Field(0)) })          // .namedT2.Z
+	bad(func() { clear(v.Field(6).Field(1)) })          // .namedT2.namedT0
+	bad(func() { clear(v.Field(6).Field(1).Field(0)) }) // .namedT2.namedT0.W
+
+	// addressable
+	v = ValueOf(&T{}).Elem()
+	ok(func() { clear(v.Field(0)) })                    // .X
+	bad(func() { clear(v.Field(1)) })                   // .t1
+	ok(func() { clear(v.Field(1).Field(0)) })           // .t1.Y
+	bad(func() { clear(v.Field(1).Field(1)) })          // .t1.t0
+	ok(func() { clear(v.Field(1).Field(1).Field(0)) })  // .t1.t0.W
+	ok(func() { clear(v.Field(2)) })                    // .T2
+	ok(func() { clear(v.Field(2).Field(0)) })           // .T2.Z
+	bad(func() { clear(v.Field(2).Field(1)) })          // .T2.namedT0
+	bad(func() { clear(v.Field(2).Field(1).Field(0)) }) // .T2.namedT0.W
+	ok(func() { clear(v.Field(3)) })                    // .NamedT1
+	ok(func() { clear(v.Field(3).Field(0)) })           // .NamedT1.Y
+	bad(func() { clear(v.Field(3).Field(1)) })          // .NamedT1.t0
+	ok(func() { clear(v.Field(3).Field(1).Field(0)) })  // .NamedT1.t0.W
+	ok(func() { clear(v.Field(4)) })                    // .NamedT2
+	ok(func() { clear(v.Field(4).Field(0)) })           // .NamedT2.Z
+	bad(func() { clear(v.Field(4).Field(1)) })          // .NamedT2.namedT0
+	bad(func() { clear(v.Field(4).Field(1).Field(0)) }) // .NamedT2.namedT0.W
+	bad(func() { clear(v.Field(5)) })                   // .namedT1
+	bad(func() { clear(v.Field(5).Field(0)) })          // .namedT1.Y
+	bad(func() { clear(v.Field(5).Field(1)) })          // .namedT1.t0
+	bad(func() { clear(v.Field(5).Field(1).Field(0)) }) // .namedT1.t0.W
+	bad(func() { clear(v.Field(6)) })                   // .namedT2
+	bad(func() { clear(v.Field(6).Field(0)) })          // .namedT2.Z
+	bad(func() { clear(v.Field(6).Field(1)) })          // .namedT2.namedT0
+	bad(func() { clear(v.Field(6).Field(1).Field(0)) }) // .namedT2.namedT0.W
+}
+
+type timp int
+
+func (t timp) W() {}
+func (t timp) Y() {}
+func (t timp) w() {}
+func (t timp) y() {}
+
+func TestCallPanic(t *testing.T) {
+	type t0 interface {
+		W()
+		w()
+	}
+	type T1 interface {
+		Y()
+		y()
+	}
+	type T2 struct {
+		T1
+		t0
+	}
+	type T struct {
+		t0 // 0
+		T1 // 1
+
+		NamedT0 t0 // 2
+		NamedT1 T1 // 3
+		NamedT2 T2 // 4
+
+		namedT0 t0 // 5
+		namedT1 T1 // 6
+		namedT2 T2 // 7
+	}
+	ok := func(f func()) { f() }
+	bad := shouldPanic
+	call := func(v Value) { v.Call(nil) }
+
+	i := timp(0)
+	v := ValueOf(T{i, i, i, i, T2{i, i}, i, i, T2{i, i}})
+	ok(func() { call(v.Field(0).Method(0)) })         // .t0.W
+	ok(func() { call(v.Field(0).Elem().Method(0)) })  // .t0.W
+	bad(func() { call(v.Field(0).Method(1)) })        // .t0.w
+	bad(func() { call(v.Field(0).Elem().Method(2)) }) // .t0.w
+	ok(func() { call(v.Field(1).Method(0)) })         // .T1.Y
+	ok(func() { call(v.Field(1).Elem().Method(0)) })  // .T1.Y
+	bad(func() { call(v.Field(1).Method(1)) })        // .T1.y
+	bad(func() { call(v.Field(1).Elem().Method(2)) }) // .T1.y
+
+	ok(func() { call(v.Field(2).Method(0)) })         // .NamedT0.W
+	ok(func() { call(v.Field(2).Elem().Method(0)) })  // .NamedT0.W
+	bad(func() { call(v.Field(2).Method(1)) })        // .NamedT0.w
+	bad(func() { call(v.Field(2).Elem().Method(2)) }) // .NamedT0.w
+
+	ok(func() { call(v.Field(3).Method(0)) })         // .NamedT1.Y
+	ok(func() { call(v.Field(3).Elem().Method(0)) })  // .NamedT1.Y
+	bad(func() { call(v.Field(3).Method(1)) })        // .NamedT1.y
+	bad(func() { call(v.Field(3).Elem().Method(3)) }) // .NamedT1.y
+
+	ok(func() { call(v.Field(4).Field(0).Method(0)) })        // .NamedT2.T1.Y
+	ok(func() { call(v.Field(4).Field(0).Elem().Method(0)) }) // .NamedT2.T1.W
+	ok(func() { call(v.Field(4).Field(1).Method(0)) })        // .NamedT2.t0.W
+	ok(func() { call(v.Field(4).Field(1).Elem().Method(0)) }) // .NamedT2.t0.W
+
+	bad(func() { call(v.Field(5).Method(0)) })        // .namedT0.W
+	bad(func() { call(v.Field(5).Elem().Method(0)) }) // .namedT0.W
+	bad(func() { call(v.Field(5).Method(1)) })        // .namedT0.w
+	bad(func() { call(v.Field(5).Elem().Method(2)) }) // .namedT0.w
+
+	bad(func() { call(v.Field(6).Method(0)) })        // .namedT1.Y
+	bad(func() { call(v.Field(6).Elem().Method(0)) }) // .namedT1.Y
+	bad(func() { call(v.Field(6).Method(0)) })        // .namedT1.y
+	bad(func() { call(v.Field(6).Elem().Method(0)) }) // .namedT1.y
+
+	bad(func() { call(v.Field(7).Field(0).Method(0)) })        // .namedT2.T1.Y
+	bad(func() { call(v.Field(7).Field(0).Elem().Method(0)) }) // .namedT2.T1.W
+	bad(func() { call(v.Field(7).Field(1).Method(0)) })        // .namedT2.t0.W
+	bad(func() { call(v.Field(7).Field(1).Elem().Method(0)) }) // .namedT2.t0.W
 }
 
 func shouldPanic(f func()) {
@@ -4262,7 +4476,7 @@ func TestFieldByIndexNil(t *testing.T) {
 // off the stack into the frame will store an *Inner there, and then if a garbage collection
 // happens to scan that argument frame before it is discarded, it will scan the *Inner
 // memory as if it were an *Outer. If the two have different memory layouts, the
-// collection will intepret the memory incorrectly.
+// collection will interpret the memory incorrectly.
 //
 // One such possible incorrect interpretation is to treat two arbitrary memory words
 // (Inner.P1 and Inner.P2 below) as an interface (Outer.R below). Because interpreting
@@ -4388,18 +4602,16 @@ func TestCallGC(t *testing.T) {
 type funcLayoutTest struct {
 	rcvr, t                  Type
 	size, argsize, retOffset uintptr
-	stack                    []byte
+	stack                    []byte // pointer bitmap: 1 is pointer, 0 is scalar (or uninitialized)
 	gc                       []byte
 }
 
 var funcLayoutTests []funcLayoutTest
 
 func init() {
-	var argAlign = PtrSize
-	var naclExtra []byte
+	var argAlign uintptr = PtrSize
 	if runtime.GOARCH == "amd64p32" {
 		argAlign = 2 * PtrSize
-		naclExtra = append(naclExtra, BitsScalar)
 	}
 	roundup := func(x uintptr, a uintptr) uintptr {
 		return (x + a - 1) / a * a
@@ -4412,17 +4624,15 @@ func init() {
 			6 * PtrSize,
 			4 * PtrSize,
 			4 * PtrSize,
-			[]byte{BitsPointer, BitsScalar, BitsPointer},
-			[]byte{BitsPointer, BitsScalar, BitsPointer, BitsScalar, BitsPointer, BitsScalar},
+			[]byte{1, 0, 1},
+			[]byte{1, 0, 1, 0, 1},
 		})
 
-	var r, s []byte
+	var r []byte
 	if PtrSize == 4 {
-		r = []byte{BitsScalar, BitsScalar, BitsScalar, BitsPointer}
-		s = append([]byte{BitsScalar, BitsScalar, BitsScalar, BitsPointer, BitsScalar}, naclExtra...)
+		r = []byte{0, 0, 0, 1}
 	} else {
-		r = []byte{BitsScalar, BitsScalar, BitsPointer}
-		s = []byte{BitsScalar, BitsScalar, BitsPointer, BitsScalar}
+		r = []byte{0, 0, 1}
 	}
 	funcLayoutTests = append(funcLayoutTests,
 		funcLayoutTest{
@@ -4432,7 +4642,7 @@ func init() {
 			roundup(3*4, PtrSize) + PtrSize + 2,
 			roundup(roundup(3*4, PtrSize)+PtrSize+2, argAlign),
 			r,
-			s,
+			r,
 		})
 
 	funcLayoutTests = append(funcLayoutTests,
@@ -4442,8 +4652,8 @@ func init() {
 			4 * PtrSize,
 			4 * PtrSize,
 			4 * PtrSize,
-			[]byte{BitsPointer, BitsScalar, BitsPointer, BitsPointer},
-			[]byte{BitsPointer, BitsScalar, BitsPointer, BitsPointer},
+			[]byte{1, 0, 1, 1},
+			[]byte{1, 0, 1, 1},
 		})
 
 	type S struct {
@@ -4457,8 +4667,8 @@ func init() {
 			4 * PtrSize,
 			4 * PtrSize,
 			4 * PtrSize,
-			[]byte{BitsScalar, BitsScalar, BitsPointer, BitsPointer},
-			[]byte{BitsScalar, BitsScalar, BitsPointer, BitsPointer},
+			[]byte{0, 0, 1, 1},
+			[]byte{0, 0, 1, 1},
 		})
 
 	funcLayoutTests = append(funcLayoutTests,
@@ -4468,8 +4678,8 @@ func init() {
 			roundup(3*PtrSize, argAlign),
 			3 * PtrSize,
 			roundup(3*PtrSize, argAlign),
-			[]byte{BitsPointer, BitsScalar, BitsPointer},
-			append([]byte{BitsPointer, BitsScalar, BitsPointer}, naclExtra...),
+			[]byte{1, 0, 1},
+			[]byte{1, 0, 1},
 		})
 
 	funcLayoutTests = append(funcLayoutTests,
@@ -4480,7 +4690,7 @@ func init() {
 			PtrSize,
 			roundup(PtrSize, argAlign),
 			[]byte{},
-			append([]byte{BitsScalar}, naclExtra...),
+			[]byte{},
 		})
 
 	funcLayoutTests = append(funcLayoutTests,
@@ -4491,7 +4701,7 @@ func init() {
 			0,
 			0,
 			[]byte{},
-			[]byte{BitsScalar},
+			[]byte{},
 		})
 
 	funcLayoutTests = append(funcLayoutTests,
@@ -4501,9 +4711,9 @@ func init() {
 			2 * PtrSize,
 			2 * PtrSize,
 			2 * PtrSize,
-			[]byte{BitsPointer},
-			[]byte{BitsPointer, BitsScalar},
-			// Note: this one is tricky, as the receiver is not a pointer.  But we
+			[]byte{1},
+			[]byte{1},
+			// Note: this one is tricky, as the receiver is not a pointer. But we
 			// pass the receiver by reference to the autogenerated pointer-receiver
 			// version of the function.
 		})
@@ -4529,6 +4739,305 @@ func TestFuncLayout(t *testing.T) {
 		}
 		if ptrs && len(stack) == 0 || !ptrs && len(stack) > 0 {
 			t.Errorf("funcLayout(%v, %v) pointers flag=%v, want %v", lt.t, lt.rcvr, ptrs, !ptrs)
+		}
+	}
+}
+
+func verifyGCBits(t *testing.T, typ Type, bits []byte) {
+	heapBits := GCBits(New(typ).Interface())
+	if !bytes.Equal(heapBits, bits) {
+		t.Errorf("heapBits incorrect for %v\nhave %v\nwant %v", typ, heapBits, bits)
+	}
+}
+
+func verifyGCBitsSlice(t *testing.T, typ Type, cap int, bits []byte) {
+	// Creating a slice causes the runtime to repeat a bitmap,
+	// which exercises a different path from making the compiler
+	// repeat a bitmap for a small array or executing a repeat in
+	// a GC program.
+	val := MakeSlice(typ, 0, cap)
+	data := NewAt(ArrayOf(cap, typ), unsafe.Pointer(val.Pointer()))
+	heapBits := GCBits(data.Interface())
+	// Repeat the bitmap for the slice size, trimming scalars in
+	// the last element.
+	bits = rep(cap, bits)
+	for len(bits) > 2 && bits[len(bits)-1] == 0 {
+		bits = bits[:len(bits)-1]
+	}
+	if !bytes.Equal(heapBits, bits) {
+		t.Errorf("heapBits incorrect for make(%v, 0, %v)\nhave %v\nwant %v", typ, cap, heapBits, bits)
+	}
+}
+
+func TestGCBits(t *testing.T) {
+	verifyGCBits(t, TypeOf((*byte)(nil)), []byte{1})
+
+	// Building blocks for types seen by the compiler (like [2]Xscalar).
+	// The compiler will create the type structures for the derived types,
+	// including their GC metadata.
+	type Xscalar struct{ x uintptr }
+	type Xptr struct{ x *byte }
+	type Xptrscalar struct {
+		*byte
+		uintptr
+	}
+	type Xscalarptr struct {
+		uintptr
+		*byte
+	}
+	type Xbigptrscalar struct {
+		_ [100]*byte
+		_ [100]uintptr
+	}
+
+	var Tscalar, Tint64, Tptr, Tscalarptr, Tptrscalar, Tbigptrscalar Type
+	{
+		// Building blocks for types constructed by reflect.
+		// This code is in a separate block so that code below
+		// cannot accidentally refer to these.
+		// The compiler must NOT see types derived from these
+		// (for example, [2]Scalar must NOT appear in the program),
+		// or else reflect will use it instead of having to construct one.
+		// The goal is to test the construction.
+		type Scalar struct{ x uintptr }
+		type Ptr struct{ x *byte }
+		type Ptrscalar struct {
+			*byte
+			uintptr
+		}
+		type Scalarptr struct {
+			uintptr
+			*byte
+		}
+		type Bigptrscalar struct {
+			_ [100]*byte
+			_ [100]uintptr
+		}
+		type Int64 int64
+		Tscalar = TypeOf(Scalar{})
+		Tint64 = TypeOf(Int64(0))
+		Tptr = TypeOf(Ptr{})
+		Tscalarptr = TypeOf(Scalarptr{})
+		Tptrscalar = TypeOf(Ptrscalar{})
+		Tbigptrscalar = TypeOf(Bigptrscalar{})
+	}
+
+	empty := []byte{}
+
+	verifyGCBits(t, TypeOf(Xscalar{}), empty)
+	verifyGCBits(t, Tscalar, empty)
+	verifyGCBits(t, TypeOf(Xptr{}), lit(1))
+	verifyGCBits(t, Tptr, lit(1))
+	verifyGCBits(t, TypeOf(Xscalarptr{}), lit(0, 1))
+	verifyGCBits(t, Tscalarptr, lit(0, 1))
+	verifyGCBits(t, TypeOf(Xptrscalar{}), lit(1))
+	verifyGCBits(t, Tptrscalar, lit(1))
+
+	verifyGCBits(t, TypeOf([0]Xptr{}), empty)
+	verifyGCBits(t, ArrayOf(0, Tptr), empty)
+	verifyGCBits(t, TypeOf([1]Xptrscalar{}), lit(1))
+	verifyGCBits(t, ArrayOf(1, Tptrscalar), lit(1))
+	verifyGCBits(t, TypeOf([2]Xscalar{}), empty)
+	verifyGCBits(t, ArrayOf(2, Tscalar), empty)
+	verifyGCBits(t, TypeOf([10000]Xscalar{}), empty)
+	verifyGCBits(t, ArrayOf(10000, Tscalar), empty)
+	verifyGCBits(t, TypeOf([2]Xptr{}), lit(1, 1))
+	verifyGCBits(t, ArrayOf(2, Tptr), lit(1, 1))
+	verifyGCBits(t, TypeOf([10000]Xptr{}), rep(10000, lit(1)))
+	verifyGCBits(t, ArrayOf(10000, Tptr), rep(10000, lit(1)))
+	verifyGCBits(t, TypeOf([2]Xscalarptr{}), lit(0, 1, 0, 1))
+	verifyGCBits(t, ArrayOf(2, Tscalarptr), lit(0, 1, 0, 1))
+	verifyGCBits(t, TypeOf([10000]Xscalarptr{}), rep(10000, lit(0, 1)))
+	verifyGCBits(t, ArrayOf(10000, Tscalarptr), rep(10000, lit(0, 1)))
+	verifyGCBits(t, TypeOf([2]Xptrscalar{}), lit(1, 0, 1))
+	verifyGCBits(t, ArrayOf(2, Tptrscalar), lit(1, 0, 1))
+	verifyGCBits(t, TypeOf([10000]Xptrscalar{}), rep(10000, lit(1, 0)))
+	verifyGCBits(t, ArrayOf(10000, Tptrscalar), rep(10000, lit(1, 0)))
+	verifyGCBits(t, TypeOf([1][10000]Xptrscalar{}), rep(10000, lit(1, 0)))
+	verifyGCBits(t, ArrayOf(1, ArrayOf(10000, Tptrscalar)), rep(10000, lit(1, 0)))
+	verifyGCBits(t, TypeOf([2][10000]Xptrscalar{}), rep(2*10000, lit(1, 0)))
+	verifyGCBits(t, ArrayOf(2, ArrayOf(10000, Tptrscalar)), rep(2*10000, lit(1, 0)))
+	verifyGCBits(t, TypeOf([4]Xbigptrscalar{}), join(rep(3, join(rep(100, lit(1)), rep(100, lit(0)))), rep(100, lit(1))))
+	verifyGCBits(t, ArrayOf(4, Tbigptrscalar), join(rep(3, join(rep(100, lit(1)), rep(100, lit(0)))), rep(100, lit(1))))
+
+	verifyGCBitsSlice(t, TypeOf([]Xptr{}), 0, empty)
+	verifyGCBitsSlice(t, SliceOf(Tptr), 0, empty)
+	verifyGCBitsSlice(t, TypeOf([]Xptrscalar{}), 1, lit(1))
+	verifyGCBitsSlice(t, SliceOf(Tptrscalar), 1, lit(1))
+	verifyGCBitsSlice(t, TypeOf([]Xscalar{}), 2, lit(0))
+	verifyGCBitsSlice(t, SliceOf(Tscalar), 2, lit(0))
+	verifyGCBitsSlice(t, TypeOf([]Xscalar{}), 10000, lit(0))
+	verifyGCBitsSlice(t, SliceOf(Tscalar), 10000, lit(0))
+	verifyGCBitsSlice(t, TypeOf([]Xptr{}), 2, lit(1))
+	verifyGCBitsSlice(t, SliceOf(Tptr), 2, lit(1))
+	verifyGCBitsSlice(t, TypeOf([]Xptr{}), 10000, lit(1))
+	verifyGCBitsSlice(t, SliceOf(Tptr), 10000, lit(1))
+	verifyGCBitsSlice(t, TypeOf([]Xscalarptr{}), 2, lit(0, 1))
+	verifyGCBitsSlice(t, SliceOf(Tscalarptr), 2, lit(0, 1))
+	verifyGCBitsSlice(t, TypeOf([]Xscalarptr{}), 10000, lit(0, 1))
+	verifyGCBitsSlice(t, SliceOf(Tscalarptr), 10000, lit(0, 1))
+	verifyGCBitsSlice(t, TypeOf([]Xptrscalar{}), 2, lit(1, 0))
+	verifyGCBitsSlice(t, SliceOf(Tptrscalar), 2, lit(1, 0))
+	verifyGCBitsSlice(t, TypeOf([]Xptrscalar{}), 10000, lit(1, 0))
+	verifyGCBitsSlice(t, SliceOf(Tptrscalar), 10000, lit(1, 0))
+	verifyGCBitsSlice(t, TypeOf([][10000]Xptrscalar{}), 1, rep(10000, lit(1, 0)))
+	verifyGCBitsSlice(t, SliceOf(ArrayOf(10000, Tptrscalar)), 1, rep(10000, lit(1, 0)))
+	verifyGCBitsSlice(t, TypeOf([][10000]Xptrscalar{}), 2, rep(10000, lit(1, 0)))
+	verifyGCBitsSlice(t, SliceOf(ArrayOf(10000, Tptrscalar)), 2, rep(10000, lit(1, 0)))
+	verifyGCBitsSlice(t, TypeOf([]Xbigptrscalar{}), 4, join(rep(100, lit(1)), rep(100, lit(0))))
+	verifyGCBitsSlice(t, SliceOf(Tbigptrscalar), 4, join(rep(100, lit(1)), rep(100, lit(0))))
+
+	verifyGCBits(t, TypeOf((chan [100]Xscalar)(nil)), lit(1))
+	verifyGCBits(t, ChanOf(BothDir, ArrayOf(100, Tscalar)), lit(1))
+
+	verifyGCBits(t, TypeOf((func([10000]Xscalarptr))(nil)), lit(1))
+	verifyGCBits(t, FuncOf([]Type{ArrayOf(10000, Tscalarptr)}, nil, false), lit(1))
+
+	verifyGCBits(t, TypeOf((map[[10000]Xscalarptr]Xscalar)(nil)), lit(1))
+	verifyGCBits(t, MapOf(ArrayOf(10000, Tscalarptr), Tscalar), lit(1))
+
+	verifyGCBits(t, TypeOf((*[10000]Xscalar)(nil)), lit(1))
+	verifyGCBits(t, PtrTo(ArrayOf(10000, Tscalar)), lit(1))
+
+	verifyGCBits(t, TypeOf(([][10000]Xscalar)(nil)), lit(1))
+	verifyGCBits(t, SliceOf(ArrayOf(10000, Tscalar)), lit(1))
+
+	hdr := make([]byte, 8/PtrSize)
+
+	verifyMapBucket := func(t *testing.T, k, e Type, m interface{}, want []byte) {
+		verifyGCBits(t, MapBucketOf(k, e), want)
+		verifyGCBits(t, CachedBucketOf(TypeOf(m)), want)
+	}
+	verifyMapBucket(t,
+		Tscalar, Tptr,
+		map[Xscalar]Xptr(nil),
+		join(hdr, rep(8, lit(0)), rep(8, lit(1)), lit(1)))
+	verifyMapBucket(t,
+		Tscalarptr, Tptr,
+		map[Xscalarptr]Xptr(nil),
+		join(hdr, rep(8, lit(0, 1)), rep(8, lit(1)), lit(1)))
+	verifyMapBucket(t, Tint64, Tptr,
+		map[int64]Xptr(nil),
+		join(hdr, rep(8, rep(8/PtrSize, lit(0))), rep(8, lit(1)), naclpad(), lit(1)))
+	verifyMapBucket(t,
+		Tscalar, Tscalar,
+		map[Xscalar]Xscalar(nil),
+		empty)
+	verifyMapBucket(t,
+		ArrayOf(2, Tscalarptr), ArrayOf(3, Tptrscalar),
+		map[[2]Xscalarptr][3]Xptrscalar(nil),
+		join(hdr, rep(8*2, lit(0, 1)), rep(8*3, lit(1, 0)), lit(1)))
+	verifyMapBucket(t,
+		ArrayOf(64/PtrSize, Tscalarptr), ArrayOf(64/PtrSize, Tptrscalar),
+		map[[64 / PtrSize]Xscalarptr][64 / PtrSize]Xptrscalar(nil),
+		join(hdr, rep(8*64/PtrSize, lit(0, 1)), rep(8*64/PtrSize, lit(1, 0)), lit(1)))
+	verifyMapBucket(t,
+		ArrayOf(64/PtrSize+1, Tscalarptr), ArrayOf(64/PtrSize, Tptrscalar),
+		map[[64/PtrSize + 1]Xscalarptr][64 / PtrSize]Xptrscalar(nil),
+		join(hdr, rep(8, lit(1)), rep(8*64/PtrSize, lit(1, 0)), lit(1)))
+	verifyMapBucket(t,
+		ArrayOf(64/PtrSize, Tscalarptr), ArrayOf(64/PtrSize+1, Tptrscalar),
+		map[[64 / PtrSize]Xscalarptr][64/PtrSize + 1]Xptrscalar(nil),
+		join(hdr, rep(8*64/PtrSize, lit(0, 1)), rep(8, lit(1)), lit(1)))
+	verifyMapBucket(t,
+		ArrayOf(64/PtrSize+1, Tscalarptr), ArrayOf(64/PtrSize+1, Tptrscalar),
+		map[[64/PtrSize + 1]Xscalarptr][64/PtrSize + 1]Xptrscalar(nil),
+		join(hdr, rep(8, lit(1)), rep(8, lit(1)), lit(1)))
+}
+
+func naclpad() []byte {
+	if runtime.GOARCH == "amd64p32" {
+		return lit(0)
+	}
+	return nil
+}
+
+func rep(n int, b []byte) []byte { return bytes.Repeat(b, n) }
+func join(b ...[]byte) []byte    { return bytes.Join(b, nil) }
+func lit(x ...byte) []byte       { return x }
+
+func TestTypeOfTypeOf(t *testing.T) {
+	// Check that all the type constructors return concrete *rtype implementations.
+	// It's difficult to test directly because the reflect package is only at arm's length.
+	// The easiest thing to do is just call a function that crashes if it doesn't get an *rtype.
+	check := func(name string, typ Type) {
+		if underlying := TypeOf(typ).String(); underlying != "*reflect.rtype" {
+			t.Errorf("%v returned %v, not *reflect.rtype", name, underlying)
+		}
+	}
+
+	type T struct{ int }
+	check("TypeOf", TypeOf(T{}))
+
+	check("ArrayOf", ArrayOf(10, TypeOf(T{})))
+	check("ChanOf", ChanOf(BothDir, TypeOf(T{})))
+	check("FuncOf", FuncOf([]Type{TypeOf(T{})}, nil, false))
+	check("MapOf", MapOf(TypeOf(T{}), TypeOf(T{})))
+	check("PtrTo", PtrTo(TypeOf(T{})))
+	check("SliceOf", SliceOf(TypeOf(T{})))
+}
+
+type XM struct{}
+
+func (*XM) String() string { return "" }
+
+func TestPtrToMethods(t *testing.T) {
+	var y struct{ XM }
+	yp := New(TypeOf(y)).Interface()
+	_, ok := yp.(fmt.Stringer)
+	if !ok {
+		t.Fatal("does not implement Stringer, but should")
+	}
+}
+
+func TestMapAlloc(t *testing.T) {
+	m := ValueOf(make(map[int]int, 10))
+	k := ValueOf(5)
+	v := ValueOf(7)
+	allocs := testing.AllocsPerRun(100, func() {
+		m.SetMapIndex(k, v)
+	})
+	if allocs > 0.5 {
+		t.Errorf("allocs per map assignment: want 0 got %f", allocs)
+	}
+}
+
+func TestChanAlloc(t *testing.T) {
+	// Note: for a chan int, the return Value must be allocated, so we
+	// use a chan *int instead.
+	c := ValueOf(make(chan *int, 1))
+	v := ValueOf(new(int))
+	allocs := testing.AllocsPerRun(100, func() {
+		c.Send(v)
+		_, _ = c.Recv()
+	})
+	if allocs < 0.5 || allocs > 1.5 {
+		t.Errorf("allocs per chan send/recv: want 1 got %f", allocs)
+	}
+	// Note: there is one allocation in reflect.recv which seems to be
+	// a limitation of escape analysis. If that is ever fixed the
+	// allocs < 0.5 condition will trigger and this test should be fixed.
+}
+
+type nameTest struct {
+	v    interface{}
+	want string
+}
+
+var nameTests = []nameTest{
+	{int32(0), "int32"},
+	{D1{}, "D1"},
+	{[]D1{}, ""},
+	{(chan D1)(nil), ""},
+	{(func() D1)(nil), ""},
+	{(<-chan D1)(nil), ""},
+	{(chan<- D1)(nil), ""},
+}
+
+func TestNames(t *testing.T) {
+	for _, test := range nameTests {
+		if got := TypeOf(test.v).Name(); got != test.want {
+			t.Errorf("%T Name()=%q, want %q", test.v, got, test.want)
 		}
 	}
 }

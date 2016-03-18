@@ -1,4 +1,4 @@
-// Copyright 2010 The Go Authors.  All rights reserved.
+// Copyright 2010 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -206,6 +206,21 @@ func TestResponseWrite(t *testing.T) {
 				Body:             nil,
 			},
 			"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n",
+		},
+
+		// When a response to a POST has Content-Length: -1, make sure we don't
+		// write the Content-Length as -1.
+		{
+			Response{
+				StatusCode:    StatusOK,
+				ProtoMajor:    1,
+				ProtoMinor:    1,
+				Request:       &Request{Method: "POST"},
+				Header:        Header{},
+				ContentLength: -1,
+				Body:          ioutil.NopCloser(strings.NewReader("abcdef")),
+			},
+			"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nabcdef",
 		},
 	}
 

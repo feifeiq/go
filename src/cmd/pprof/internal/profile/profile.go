@@ -114,7 +114,7 @@ type Function struct {
 	filenameX   int64
 }
 
-// Parse parses a profile and checks for its validity.  The input
+// Parse parses a profile and checks for its validity. The input
 // may be a gzip-compressed encoded protobuf or one of many legacy
 // profile formats which may be unsupported in the future.
 func Parse(r io.Reader) (*Profile, error) {
@@ -125,11 +125,11 @@ func Parse(r io.Reader) (*Profile, error) {
 
 	var p *Profile
 	if len(orig) >= 2 && orig[0] == 0x1f && orig[1] == 0x8b {
-		var data []byte
-
-		if gz, err := gzip.NewReader(bytes.NewBuffer(orig)); err == nil {
-			data, err = ioutil.ReadAll(gz)
+		gz, err := gzip.NewReader(bytes.NewBuffer(orig))
+		if err != nil {
+			return nil, fmt.Errorf("decompressing profile: %v", err)
 		}
+		data, err := ioutil.ReadAll(gz)
 		if err != nil {
 			return nil, fmt.Errorf("decompressing profile: %v", err)
 		}
@@ -221,7 +221,7 @@ func (p *Profile) Write(w io.Writer) error {
 	return err
 }
 
-// CheckValid tests whether the profile is valid.  Checks include, but are
+// CheckValid tests whether the profile is valid. Checks include, but are
 // not limited to:
 //   - len(Profile.Sample[n].value) == len(Profile.value_unit)
 //   - Sample.id has a corresponding Profile.Location
@@ -564,4 +564,9 @@ func (p *Profile) Demangle(d Demangler) error {
 		}
 	}
 	return nil
+}
+
+// Empty returns true if the profile contains no samples.
+func (p *Profile) Empty() bool {
+	return len(p.Sample) == 0
 }

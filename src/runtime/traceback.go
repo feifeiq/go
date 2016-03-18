@@ -4,7 +4,10 @@
 
 package runtime
 
-import "unsafe"
+import (
+	"runtime/internal/sys"
+	"unsafe"
+)
 
 // The code in this file implements stack trace walking for all architectures.
 // The most important fact about a given architecture is whether it uses a link register.
@@ -26,9 +29,10 @@ import "unsafe"
 // stores an 8-byte return PC onto the stack. To accommodate this, we use regSize
 // as the size of the architecture-pushed return PC.
 //
-// usesLR is defined below. ptrSize and regSize are defined in stubs.go.
+// usesLR is defined below in terms of minFrameSize, which is defined in
+// arch_$GOARCH.go. ptrSize and regSize are defined in stubs.go.
 
-const usesLR = GOARCH != "amd64" && GOARCH != "amd64p32" && GOARCH != "386"
+const usesLR = sys.MinFrameSize > 0
 
 var (
 	// initialized in tracebackinit
@@ -40,12 +44,16 @@ var (
 	rt0_goPC             uintptr
 	sigpanicPC           uintptr
 	runfinqPC            uintptr
-	backgroundgcPC       uintptr
 	bgsweepPC            uintptr
 	forcegchelperPC      uintptr
 	timerprocPC          uintptr
 	gcBgMarkWorkerPC     uintptr
 	systemstack_switchPC uintptr
+	systemstackPC        uintptr
+	stackBarrierPC       uintptr
+	cgocallback_gofuncPC uintptr
+
+	gogoPC uintptr
 
 	externalthreadhandlerp uintptr // initialized elsewhere
 )
@@ -63,12 +71,17 @@ func tracebackinit() {
 	rt0_goPC = funcPC(rt0_go)
 	sigpanicPC = funcPC(sigpanic)
 	runfinqPC = funcPC(runfinq)
-	backgroundgcPC = funcPC(backgroundgc)
 	bgsweepPC = funcPC(bgsweep)
 	forcegchelperPC = funcPC(forcegchelper)
 	timerprocPC = funcPC(timerproc)
 	gcBgMarkWorkerPC = funcPC(gcBgMarkWorker)
 	systemstack_switchPC = funcPC(systemstack_switch)
+	systemstackPC = funcPC(systemstack)
+	stackBarrierPC = funcPC(stackBarrier)
+	cgocallback_gofuncPC = funcPC(cgocallback_gofunc)
+
+	// used by sigprof handler
+	gogoPC = funcPC(gogo)
 }
 
 // Traceback over the deferred function calls.
@@ -85,7 +98,7 @@ func tracebackdefers(gp *g, callback func(*stkframe, unsafe.Pointer) bool, v uns
 			frame.arglen = 0
 			frame.argmap = nil
 		} else {
-			frame.pc = uintptr(fn.fn)
+			frame.pc = fn.fn
 			f := findfunc(frame.pc)
 			if f == nil {
 				print("runtime: unknown pc in defer ", hex(frame.pc), "\n")
@@ -93,7 +106,7 @@ func tracebackdefers(gp *g, callback func(*stkframe, unsafe.Pointer) bool, v uns
 			}
 			frame.fn = f
 			frame.argp = uintptr(deferArgs(d))
-			setArgInfo(&frame, f, true)
+			frame.arglen, frame.argmap = getArgInfo(&frame, f, true)
 		}
 		frame.continpc = frame.pc
 		if !callback((*stkframe)(noescape(unsafe.Pointer(&frame))), v) {
@@ -102,7 +115,7 @@ func tracebackdefers(gp *g, callback func(*stkframe, unsafe.Pointer) bool, v uns
 	}
 }
 
-// Generic traceback.  Handles runtime stack prints (pcbuf == nil),
+// Generic traceback. Handles runtime stack prints (pcbuf == nil),
 // the runtime.Callers function (pcbuf != nil), as well as the garbage
 // collector (callback != nil).  A little clunky to merge these, but avoids
 // duplicating the code and all its subtlety.
@@ -127,7 +140,13 @@ func gentraceback(pc0, sp0, lr0 uintptr, gp *g, skip int, pcbuf *uintptr, max in
 		// instead on the g0 stack.
 		throw("gentraceback cannot trace user goroutine on its own stack")
 	}
-	gotraceback := gotraceback(nil)
+	level, _, _ := gotraceback()
+
+	// Fix up returns to the stack barrier by fetching the
+	// original return PC from gp.stkbar.
+	stkbarG := gp
+	stkbar := stkbarG.stkbar[stkbarG.stkbarPos:]
+
 	if pc0 == ^uintptr(0) && sp0 == ^uintptr(0) { // Signal to fetch saved values from gp.
 		if gp.syscallsp != 0 {
 			pc0 = gp.syscallpc
@@ -155,7 +174,7 @@ func gentraceback(pc0, sp0, lr0 uintptr, gp *g, skip int, pcbuf *uintptr, max in
 	printing := pcbuf == nil && callback == nil
 	_defer := gp._defer
 
-	for _defer != nil && uintptr(_defer.sp) == _NoArgs {
+	for _defer != nil && _defer.sp == _NoArgs {
 		_defer = _defer.link
 	}
 
@@ -166,12 +185,40 @@ func gentraceback(pc0, sp0, lr0 uintptr, gp *g, skip int, pcbuf *uintptr, max in
 			frame.pc = *(*uintptr)(unsafe.Pointer(frame.sp))
 			frame.lr = 0
 		} else {
-			frame.pc = uintptr(*(*uintreg)(unsafe.Pointer(frame.sp)))
-			frame.sp += regSize
+			frame.pc = uintptr(*(*sys.Uintreg)(unsafe.Pointer(frame.sp)))
+			frame.sp += sys.RegSize
 		}
 	}
 
 	f := findfunc(frame.pc)
+	if f != nil && f.entry == stackBarrierPC {
+		// We got caught in the middle of a stack barrier
+		// (presumably by a signal), so stkbar may be
+		// inconsistent with the barriers on the stack.
+		// Simulate the completion of the barrier.
+		//
+		// On x86, SP will be exactly one word above
+		// savedLRPtr. On LR machines, SP will be above
+		// savedLRPtr by some frame size.
+		var stkbarPos uintptr
+		if len(stkbar) > 0 && stkbar[0].savedLRPtr < sp0 {
+			// stackBarrier has not incremented stkbarPos.
+			stkbarPos = gp.stkbarPos
+		} else if gp.stkbarPos > 0 && gp.stkbar[gp.stkbarPos-1].savedLRPtr < sp0 {
+			// stackBarrier has incremented stkbarPos.
+			stkbarPos = gp.stkbarPos - 1
+		} else {
+			printlock()
+			print("runtime: failed to unwind through stackBarrier at SP ", hex(sp0), "; ")
+			gcPrintStkbars(gp, int(gp.stkbarPos))
+			print("\n")
+			throw("inconsistent state in stackBarrier")
+		}
+
+		frame.pc = gp.stkbar[stkbarPos].savedLRVal
+		stkbar = gp.stkbar[stkbarPos+1:]
+		f = findfunc(frame.pc)
+	}
 	if f == nil {
 		if callback != nil {
 			print("runtime: unknown pc ", hex(frame.pc), "\n")
@@ -180,6 +227,8 @@ func gentraceback(pc0, sp0, lr0 uintptr, gp *g, skip int, pcbuf *uintptr, max in
 		return 0
 	}
 	frame.fn = f
+
+	var cache pcvalueCache
 
 	n := 0
 	for n < max {
@@ -194,10 +243,19 @@ func gentraceback(pc0, sp0, lr0 uintptr, gp *g, skip int, pcbuf *uintptr, max in
 		// Found an actual function.
 		// Derive frame pointer and link register.
 		if frame.fp == 0 {
-			frame.fp = frame.sp + uintptr(funcspdelta(f, frame.pc))
+			// We want to jump over the systemstack switch. If we're running on the
+			// g0, this systemstack is at the top of the stack.
+			// if we're not on g0 or there's a no curg, then this is a regular call.
+			sp := frame.sp
+			if flags&_TraceJumpStack != 0 && f.entry == systemstackPC && gp == g.m.g0 && gp.m.curg != nil {
+				sp = gp.m.curg.sched.sp
+				stkbarG = gp.m.curg
+				stkbar = stkbarG.stkbar[stkbarG.stkbarPos:]
+			}
+			frame.fp = sp + uintptr(funcspdelta(f, frame.pc, &cache))
 			if !usesLR {
 				// On x86, call instruction pushes return PC before entering new function.
-				frame.fp += regSize
+				frame.fp += sys.RegSize
 			}
 		}
 		var flr *_func
@@ -216,14 +274,28 @@ func gentraceback(pc0, sp0, lr0 uintptr, gp *g, skip int, pcbuf *uintptr, max in
 			}
 			frame.lr = 0
 		} else {
+			var lrPtr uintptr
 			if usesLR {
 				if n == 0 && frame.sp < frame.fp || frame.lr == 0 {
-					frame.lr = *(*uintptr)(unsafe.Pointer(frame.sp))
+					lrPtr = frame.sp
+					frame.lr = *(*uintptr)(unsafe.Pointer(lrPtr))
 				}
 			} else {
 				if frame.lr == 0 {
-					frame.lr = uintptr(*(*uintreg)(unsafe.Pointer(frame.fp - regSize)))
+					lrPtr = frame.fp - sys.RegSize
+					frame.lr = uintptr(*(*sys.Uintreg)(unsafe.Pointer(lrPtr)))
 				}
+			}
+			if frame.lr == stackBarrierPC {
+				// Recover original PC.
+				if len(stkbar) == 0 || stkbar[0].savedLRPtr != lrPtr {
+					print("found next stack barrier at ", hex(lrPtr), "; expected ")
+					gcPrintStkbars(stkbarG, len(stkbarG.stkbar)-len(stkbar))
+					print("\n")
+					throw("missed stack barrier")
+				}
+				frame.lr = stkbar[0].savedLRVal
+				stkbar = stkbar[1:]
 			}
 			flr = findfunc(frame.lr)
 			if flr == nil {
@@ -241,13 +313,13 @@ func gentraceback(pc0, sp0, lr0 uintptr, gp *g, skip int, pcbuf *uintptr, max in
 		frame.varp = frame.fp
 		if !usesLR {
 			// On x86, call instruction pushes return PC before entering new function.
-			frame.varp -= regSize
+			frame.varp -= sys.RegSize
 		}
 
 		// If framepointer_enabled and there's a frame, then
 		// there's a saved bp here.
 		if framepointer_enabled && GOARCH == "amd64" && frame.varp > frame.sp {
-			frame.varp -= regSize
+			frame.varp -= sys.RegSize
 		}
 
 		// Derive size of arguments.
@@ -257,11 +329,8 @@ func gentraceback(pc0, sp0, lr0 uintptr, gp *g, skip int, pcbuf *uintptr, max in
 		// in package runtime and reflect, and for those we use call-specific
 		// metadata recorded by f's caller.
 		if callback != nil || printing {
-			frame.argp = frame.fp
-			if usesLR {
-				frame.argp += ptrSize
-			}
-			setArgInfo(&frame, f, callback != nil)
+			frame.argp = frame.fp + sys.MinFrameSize
+			frame.arglen, frame.argmap = getArgInfo(&frame, f, callback != nil)
 		}
 
 		// Determine frame's 'continuation PC', where it can continue.
@@ -311,9 +380,13 @@ func gentraceback(pc0, sp0, lr0 uintptr, gp *g, skip int, pcbuf *uintptr, max in
 				if (n > 0 || flags&_TraceTrap == 0) && frame.pc > f.entry && !waspanic {
 					tracepc--
 				}
-				print(funcname(f), "(")
+				name := funcname(f)
+				if name == "runtime.gopanic" {
+					name = "panic"
+				}
+				print(name, "(")
 				argp := (*[100]uintptr)(unsafe.Pointer(frame.argp))
-				for i := uintptr(0); i < frame.arglen/ptrSize; i++ {
+				for i := uintptr(0); i < frame.arglen/sys.PtrSize; i++ {
 					if i >= 10 {
 						print(", ...")
 						break
@@ -329,7 +402,7 @@ func gentraceback(pc0, sp0, lr0 uintptr, gp *g, skip int, pcbuf *uintptr, max in
 				if frame.pc > f.entry {
 					print(" +", hex(frame.pc-f.entry))
 				}
-				if g.m.throwing > 0 && gp == g.m.curg || gotraceback >= 2 {
+				if g.m.throwing > 0 && gp == g.m.curg || level >= 2 {
 					print(" fp=", hex(frame.fp), " sp=", hex(frame.sp))
 				}
 				print("\n")
@@ -358,16 +431,16 @@ func gentraceback(pc0, sp0, lr0 uintptr, gp *g, skip int, pcbuf *uintptr, max in
 		// before faking a call to sigpanic.
 		if usesLR && waspanic {
 			x := *(*uintptr)(unsafe.Pointer(frame.sp))
-			frame.sp += ptrSize
+			frame.sp += sys.MinFrameSize
 			if GOARCH == "arm64" {
 				// arm64 needs 16-byte aligned SP, always
-				frame.sp += ptrSize
+				frame.sp += sys.PtrSize
 			}
 			f = findfunc(frame.pc)
 			frame.fn = f
 			if f == nil {
 				frame.pc = x
-			} else if funcspdelta(f, frame.pc) == 0 {
+			} else if funcspdelta(f, frame.pc, &cache) == 0 {
 				frame.lr = x
 			}
 		}
@@ -436,29 +509,40 @@ func gentraceback(pc0, sp0, lr0 uintptr, gp *g, skip int, pcbuf *uintptr, max in
 		throw("traceback has leftover defers")
 	}
 
+	if callback != nil && n < max && len(stkbar) > 0 {
+		print("runtime: g", gp.goid, ": leftover stack barriers ")
+		gcPrintStkbars(stkbarG, len(stkbarG.stkbar)-len(stkbar))
+		print("\n")
+		throw("traceback has leftover stack barriers")
+	}
+
+	if callback != nil && n < max && frame.sp != gp.stktopsp {
+		print("runtime: g", gp.goid, ": frame.sp=", hex(frame.sp), " top=", hex(gp.stktopsp), "\n")
+		print("\tstack=[", hex(gp.stack.lo), "-", hex(gp.stack.hi), "] n=", n, " max=", max, "\n")
+		throw("traceback did not unwind completely")
+	}
+
 	return n
 }
 
-func setArgInfo(frame *stkframe, f *_func, needArgMap bool) {
-	frame.arglen = uintptr(f.args)
+func getArgInfo(frame *stkframe, f *_func, needArgMap bool) (arglen uintptr, argmap *bitvector) {
+	arglen = uintptr(f.args)
 	if needArgMap && f.args == _ArgsSizeUnknown {
 		// Extract argument bitmaps for reflect stubs from the calls they made to reflect.
 		switch funcname(f) {
 		case "reflect.makeFuncStub", "reflect.methodValueCall":
-			arg0 := frame.sp
-			if usesLR {
-				arg0 += ptrSize
-			}
+			arg0 := frame.sp + sys.MinFrameSize
 			fn := *(**[2]uintptr)(unsafe.Pointer(arg0))
 			if fn[0] != f.entry {
 				print("runtime: confused by ", funcname(f), "\n")
 				throw("reflect mismatch")
 			}
 			bv := (*bitvector)(unsafe.Pointer(fn[1]))
-			frame.arglen = uintptr(bv.n / 2 * ptrSize)
-			frame.argmap = bv
+			arglen = uintptr(bv.n * sys.PtrSize)
+			argmap = bv
 		}
 	}
+	return
 }
 
 func printcreatedby(gp *g) {
@@ -469,7 +553,7 @@ func printcreatedby(gp *g) {
 		print("created by ", funcname(f), "\n")
 		tracepc := pc // back up to CALL instruction for funcline.
 		if pc > f.entry {
-			tracepc -= _PCQuantum
+			tracepc -= sys.PCQuantum
 		}
 		file, line := funcline(f, tracepc)
 		print("\t", file, ":", line)
@@ -516,10 +600,11 @@ func traceback1(pc, sp, lr uintptr, gp *g, flags uint) {
 
 func callers(skip int, pcbuf []uintptr) int {
 	sp := getcallersp(unsafe.Pointer(&skip))
-	pc := uintptr(getcallerpc(unsafe.Pointer(&skip)))
+	pc := getcallerpc(unsafe.Pointer(&skip))
+	gp := getg()
 	var n int
 	systemstack(func() {
-		n = gentraceback(pc, sp, 0, getg(), skip, &pcbuf[0], len(pcbuf), nil, nil, 0)
+		n = gentraceback(pc, sp, 0, gp, skip, &pcbuf[0], len(pcbuf), nil, nil, 0)
 	})
 	return n
 }
@@ -533,17 +618,17 @@ func showframe(f *_func, gp *g) bool {
 	if g.m.throwing > 0 && gp != nil && (gp == g.m.curg || gp == g.m.caughtsig.ptr()) {
 		return true
 	}
-	traceback := gotraceback(nil)
+	level, _, _ := gotraceback()
 	name := funcname(f)
 
-	// Special case: always show runtime.panic frame, so that we can
+	// Special case: always show runtime.gopanic frame, so that we can
 	// see where a panic started in the middle of a stack trace.
 	// See golang.org/issue/5832.
-	if name == "runtime.panic" {
+	if name == "runtime.gopanic" {
 		return true
 	}
 
-	return traceback > 1 || f != nil && contains(name, ".") && (!hasprefix(name, "runtime.") || isExportedRuntime(name))
+	return level > 1 || f != nil && contains(name, ".") && (!hasprefix(name, "runtime.") || isExportedRuntime(name))
 }
 
 // isExportedRuntime reports whether name is an exported runtime function.
@@ -560,45 +645,37 @@ var gStatusStrings = [...]string{
 	_Gsyscall:   "syscall",
 	_Gwaiting:   "waiting",
 	_Gdead:      "dead",
-	_Genqueue:   "enqueue",
 	_Gcopystack: "copystack",
-}
-
-var gScanStatusStrings = [...]string{
-	0:          "scan",
-	_Grunnable: "scanrunnable",
-	_Grunning:  "scanrunning",
-	_Gsyscall:  "scansyscall",
-	_Gwaiting:  "scanwaiting",
-	_Gdead:     "scandead",
-	_Genqueue:  "scanenqueue",
 }
 
 func goroutineheader(gp *g) {
 	gpstatus := readgstatus(gp)
 
+	isScan := gpstatus&_Gscan != 0
+	gpstatus &^= _Gscan // drop the scan bit
+
 	// Basic string status
 	var status string
 	if 0 <= gpstatus && gpstatus < uint32(len(gStatusStrings)) {
 		status = gStatusStrings[gpstatus]
-	} else if gpstatus&_Gscan != 0 && 0 <= gpstatus&^_Gscan && gpstatus&^_Gscan < uint32(len(gStatusStrings)) {
-		status = gStatusStrings[gpstatus&^_Gscan]
 	} else {
 		status = "???"
 	}
 
 	// Override.
-	if (gpstatus == _Gwaiting || gpstatus == _Gscanwaiting) && gp.waitreason != "" {
+	if gpstatus == _Gwaiting && gp.waitreason != "" {
 		status = gp.waitreason
 	}
 
 	// approx time the G is blocked, in minutes
 	var waitfor int64
-	gpstatus &^= _Gscan // drop the scan bit
 	if (gpstatus == _Gwaiting || gpstatus == _Gsyscall) && gp.waitsince != 0 {
 		waitfor = (nanotime() - gp.waitsince) / 60e9
 	}
 	print("goroutine ", gp.goid, " [", status)
+	if isScan {
+		print(" (scan)")
+	}
 	if waitfor >= 1 {
 		print(", ", waitfor, " minutes")
 	}
@@ -609,7 +686,7 @@ func goroutineheader(gp *g) {
 }
 
 func tracebackothers(me *g) {
-	level := gotraceback(nil)
+	level, _, _ := gotraceback()
 
 	// Show the current goroutine first, if we haven't already.
 	g := getg()
@@ -627,7 +704,11 @@ func tracebackothers(me *g) {
 		}
 		print("\n")
 		goroutineheader(gp)
-		if readgstatus(gp)&^_Gscan == _Grunning {
+		// Note: gp.m == g.m occurs when tracebackothers is
+		// called from a signal handler initiated during a
+		// systemstack call. The original G is still in the
+		// running state, and we want to print its stack.
+		if gp.m != g.m && readgstatus(gp)&^_Gscan == _Grunning {
 			print("\tgoroutine running on other thread; stack unavailable\n")
 			printcreatedby(gp)
 		} else {
@@ -653,7 +734,6 @@ func topofstack(f *_func) bool {
 func isSystemGoroutine(gp *g) bool {
 	pc := gp.startpc
 	return pc == runfinqPC && !fingRunning ||
-		pc == backgroundgcPC ||
 		pc == bgsweepPC ||
 		pc == forcegchelperPC ||
 		pc == timerprocPC ||

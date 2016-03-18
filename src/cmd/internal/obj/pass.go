@@ -157,7 +157,9 @@ func linkpatch(ctxt *Link, sym *LSym) {
 
 	for p := sym.Text; p != nil; p = p.Link {
 		checkaddr(ctxt, p, &p.From)
-		checkaddr(ctxt, p, &p.From3)
+		if p.From3 != nil {
+			checkaddr(ctxt, p, p.From3)
+		}
 		checkaddr(ctxt, p, &p.To)
 
 		if ctxt.Arch.Progedit != nil {
@@ -200,13 +202,14 @@ func linkpatch(ctxt *Link, sym *LSym) {
 		p.Pcond = q
 	}
 
-	for p := sym.Text; p != nil; p = p.Link {
-		p.Mark = 0 /* initialization for follow */
-		if p.Pcond != nil {
-			p.Pcond = brloop(ctxt, p.Pcond)
+	if ctxt.Flag_optimize {
+		for p := sym.Text; p != nil; p = p.Link {
 			if p.Pcond != nil {
-				if p.To.Type == TYPE_BRANCH {
-					p.To.Offset = p.Pcond.Pc
+				p.Pcond = brloop(ctxt, p.Pcond)
+				if p.Pcond != nil {
+					if p.To.Type == TYPE_BRANCH {
+						p.To.Offset = p.Pcond.Pc
+					}
 				}
 			}
 		}

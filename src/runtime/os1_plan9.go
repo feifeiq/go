@@ -1,10 +1,15 @@
-// Copyright 2010 The Go Authors.  All rights reserved.
+// Copyright 2010 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
 package runtime
 
-import "unsafe"
+import (
+	"runtime/internal/atomic"
+	"unsafe"
+)
+
+type sigset struct{}
 
 // Called to initialize a new m (including the bootstrap m).
 // Called on the parent thread (main thread in case of bootstrap), can allocate memory.
@@ -18,8 +23,17 @@ func mpreinit(mp *m) {
 	mp.errstr = (*byte)(mallocgc(_ERRMAX, nil, _FlagNoScan))
 }
 
+func msigsave(mp *m) {
+}
+
+func msigrestore(sigmask sigset) {
+}
+
+func sigblock() {
+}
+
 // Called to initialize a new m (including the bootstrap m).
-// Called on the new thread, can not allocate memory.
+// Called on the new thread, cannot allocate memory.
 func minit() {
 	// Mask all SSE floating-point exceptions
 	// when running on the 64-bit kernel.
@@ -93,7 +107,7 @@ func getRandomData(r []byte) {
 func goenvs() {
 }
 
-func initsig() {
+func initsig(preinit bool) {
 }
 
 //go:nosplit
@@ -137,14 +151,16 @@ var goexits = []byte("go: exit ")
 
 func goexitsall(status *byte) {
 	var buf [_ERRMAX]byte
+	getg().m.locks++
 	n := copy(buf[:], goexits)
 	n = copy(buf[n:], gostringnocopy(status))
 	pid := getpid()
-	for mp := (*m)(atomicloadp(unsafe.Pointer(&allm))); mp != nil; mp = mp.alllink {
+	for mp := (*m)(atomic.Loadp(unsafe.Pointer(&allm))); mp != nil; mp = mp.alllink {
 		if mp.procid != pid {
 			postnote(mp.procid, buf[:])
 		}
 	}
+	getg().m.locks--
 }
 
 var procdir = []byte("/proc/")
@@ -161,7 +177,7 @@ func postnote(pid uint64, msg []byte) int {
 		return -1
 	}
 	len := findnull(&msg[0])
-	if write(uintptr(fd), (unsafe.Pointer)(&msg[0]), int32(len)) != int64(len) {
+	if write(uintptr(fd), unsafe.Pointer(&msg[0]), int32(len)) != int64(len) {
 		closefd(fd)
 		return -1
 	}
@@ -177,7 +193,7 @@ func exit(e int) {
 	} else {
 		// build error string
 		var tmp [32]byte
-		status = []byte(gostringnocopy(&itoa(tmp[:len(tmp)-1], uint64(e))[0]))
+		status = append(itoa(tmp[:len(tmp)-1], uint64(e)), 0)
 	}
 	goexitsall(&status[0])
 	exits(&status[0])
@@ -199,8 +215,7 @@ func newosproc(mp *m, stk unsafe.Pointer) {
 }
 
 //go:nosplit
-func semacreate() uintptr {
-	return 1
+func semacreate(mp *m) {
 }
 
 //go:nosplit
@@ -244,11 +259,15 @@ func memlimit() uint64 {
 
 var _badsignal = []byte("runtime: signal received on thread not created by Go.\n")
 
-// This runs on a foreign stack, without an m or a g.  No stack split.
+// This runs on a foreign stack, without an m or a g. No stack split.
 //go:nosplit
 func badsignal2() {
 	pwrite(2, unsafe.Pointer(&_badsignal[0]), int32(len(_badsignal)), -1)
 	exits(&_badsignal[0])
+}
+
+func raisebadsignal(sig int32) {
+	badsignal2()
 }
 
 func _atoi(b []byte) int {

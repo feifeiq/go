@@ -5,10 +5,12 @@
 package net
 
 import (
+	"errors"
 	"fmt"
 	"io/ioutil"
 	"os"
 	"sync"
+	"testing"
 	"time"
 )
 
@@ -16,7 +18,7 @@ import (
 // It also uses /tmp directory in case it is prohibited to create UNIX
 // sockets in TMPDIR.
 func testUnixAddr() string {
-	f, err := ioutil.TempFile("", "nettest")
+	f, err := ioutil.TempFile("", "go-nettest")
 	if err != nil {
 		panic(err)
 	}
@@ -28,10 +30,20 @@ func testUnixAddr() string {
 
 func newLocalListener(network string) (Listener, error) {
 	switch network {
-	case "tcp", "tcp4", "tcp6":
+	case "tcp":
+		if supportsIPv4 {
+			if ln, err := Listen("tcp4", "127.0.0.1:0"); err == nil {
+				return ln, nil
+			}
+		}
+		if supportsIPv6 {
+			return Listen("tcp6", "[::1]:0")
+		}
+	case "tcp4":
 		if supportsIPv4 {
 			return Listen("tcp4", "127.0.0.1:0")
 		}
+	case "tcp6":
 		if supportsIPv6 {
 			return Listen("tcp6", "[::1]:0")
 		}
@@ -39,6 +51,37 @@ func newLocalListener(network string) (Listener, error) {
 		return Listen(network, testUnixAddr())
 	}
 	return nil, fmt.Errorf("%s is not supported", network)
+}
+
+func newDualStackListener() (lns []*TCPListener, err error) {
+	var args = []struct {
+		network string
+		TCPAddr
+	}{
+		{"tcp4", TCPAddr{IP: IPv4(127, 0, 0, 1)}},
+		{"tcp6", TCPAddr{IP: IPv6loopback}},
+	}
+	for i := 0; i < 64; i++ {
+		var port int
+		var lns []*TCPListener
+		for _, arg := range args {
+			arg.TCPAddr.Port = port
+			ln, err := ListenTCP(arg.network, &arg.TCPAddr)
+			if err != nil {
+				continue
+			}
+			port = ln.Addr().(*TCPAddr).Port
+			lns = append(lns, ln)
+		}
+		if len(lns) != len(args) {
+			for _, ln := range lns {
+				ln.Close()
+			}
+			continue
+		}
+		return lns, nil
+	}
+	return nil, errors.New("no dualstack port available")
 }
 
 type localServer struct {
@@ -153,7 +196,7 @@ func newDualStackServer(lns []streamListener) (*dualStackServer, error) {
 	for i := range dss.lns {
 		ln, err := Listen(dss.lns[i].network, JoinHostPort(dss.lns[i].address, dss.port))
 		if err != nil {
-			for _, ln := range dss.lns {
+			for _, ln := range dss.lns[:i] {
 				ln.Listener.Close()
 			}
 			return nil, err
@@ -250,6 +293,54 @@ func transceiver(c Conn, wb []byte, ch chan<- error) {
 	}
 }
 
+func timeoutReceiver(c Conn, d, min, max time.Duration, ch chan<- error) {
+	var err error
+	defer func() { ch <- err }()
+
+	t0 := time.Now()
+	if err = c.SetReadDeadline(time.Now().Add(d)); err != nil {
+		return
+	}
+	b := make([]byte, 256)
+	var n int
+	n, err = c.Read(b)
+	t1 := time.Now()
+	if n != 0 || err == nil || !err.(Error).Timeout() {
+		err = fmt.Errorf("Read did not return (0, timeout): (%d, %v)", n, err)
+		return
+	}
+	if dt := t1.Sub(t0); min > dt || dt > max && !testing.Short() {
+		err = fmt.Errorf("Read took %s; expected %s", dt, d)
+		return
+	}
+}
+
+func timeoutTransmitter(c Conn, d, min, max time.Duration, ch chan<- error) {
+	var err error
+	defer func() { ch <- err }()
+
+	t0 := time.Now()
+	if err = c.SetWriteDeadline(time.Now().Add(d)); err != nil {
+		return
+	}
+	var n int
+	for {
+		n, err = c.Write([]byte("TIMEOUT TRANSMITTER"))
+		if err != nil {
+			break
+		}
+	}
+	t1 := time.Now()
+	if err == nil || !err.(Error).Timeout() {
+		err = fmt.Errorf("Write did not return (any, timeout): (%d, %v)", n, err)
+		return
+	}
+	if dt := t1.Sub(t0); min > dt || dt > max && !testing.Short() {
+		err = fmt.Errorf("Write took %s; expected %s", dt, d)
+		return
+	}
+}
+
 func newLocalPacketListener(network string) (PacketConn, error) {
 	switch network {
 	case "udp", "udp4", "udp6":
@@ -263,6 +354,37 @@ func newLocalPacketListener(network string) (PacketConn, error) {
 		return ListenPacket(network, testUnixAddr())
 	}
 	return nil, fmt.Errorf("%s is not supported", network)
+}
+
+func newDualStackPacketListener() (cs []*UDPConn, err error) {
+	var args = []struct {
+		network string
+		UDPAddr
+	}{
+		{"udp4", UDPAddr{IP: IPv4(127, 0, 0, 1)}},
+		{"udp6", UDPAddr{IP: IPv6loopback}},
+	}
+	for i := 0; i < 64; i++ {
+		var port int
+		var cs []*UDPConn
+		for _, arg := range args {
+			arg.UDPAddr.Port = port
+			c, err := ListenUDP(arg.network, &arg.UDPAddr)
+			if err != nil {
+				continue
+			}
+			port = c.LocalAddr().(*UDPAddr).Port
+			cs = append(cs, c)
+		}
+		if len(cs) != len(args) {
+			for _, c := range cs {
+				c.Close()
+			}
+			continue
+		}
+		return cs, nil
+	}
+	return nil, errors.New("no dualstack port available")
 }
 
 type localPacketServer struct {
@@ -378,5 +500,27 @@ func packetTransceiver(c PacketConn, wb []byte, dst Addr, ch chan<- error) {
 	}
 	if n != len(wb) {
 		ch <- fmt.Errorf("read %d; want %d", n, len(wb))
+	}
+}
+
+func timeoutPacketReceiver(c PacketConn, d, min, max time.Duration, ch chan<- error) {
+	var err error
+	defer func() { ch <- err }()
+
+	t0 := time.Now()
+	if err = c.SetReadDeadline(time.Now().Add(d)); err != nil {
+		return
+	}
+	b := make([]byte, 256)
+	var n int
+	n, _, err = c.ReadFrom(b)
+	t1 := time.Now()
+	if n != 0 || err == nil || !err.(Error).Timeout() {
+		err = fmt.Errorf("ReadFrom did not return (0, timeout): (%d, %v)", n, err)
+		return
+	}
+	if dt := t1.Sub(t0); min > dt || dt > max && !testing.Short() {
+		err = fmt.Errorf("ReadFrom took %s; expected %s", dt, d)
+		return
 	}
 }

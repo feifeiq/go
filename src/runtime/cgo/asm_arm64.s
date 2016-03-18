@@ -1,4 +1,4 @@
-// Copyright 2015 The Go Authors.  All rights reserved.
+// Copyright 2015 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -12,7 +12,7 @@ TEXT crosscall2(SB),NOSPLIT,$-8
 	/*
 	 * We still need to save all callee save register as before, and then
 	 *  push 2 args for fn (R1 and R2).
-	 * Also note that at procedure entry in 7g world, 8(RSP) will be the
+	 * Also note that at procedure entry in gc world, 8(RSP) will be the
 	 *  first arg.
 	 * TODO(minux): use LDP/STP here if it matters.
 	 */

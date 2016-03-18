@@ -25,12 +25,13 @@ import (
 //	  together, so that given (only) calls Push(10, "x.go", 1) and Pop(15),
 //	  virtual line 12 corresponds to x.go line 3.
 type LineHist struct {
-	Top            *LineStack  // current top of stack
-	Ranges         []LineRange // ranges for lookup
-	Dir            string      // directory to qualify relative paths
-	TrimPathPrefix string      // remove leading TrimPath from recorded file names
-	GOROOT         string      // current GOROOT
-	GOROOT_FINAL   string      // target GOROOT
+	Top               *LineStack  // current top of stack
+	Ranges            []LineRange // ranges for lookup
+	Dir               string      // directory to qualify relative paths
+	TrimPathPrefix    string      // remove leading TrimPath from recorded file names
+	PrintFilenameOnly bool        // ignore path when pretty-printing a line; internal use only
+	GOROOT            string      // current GOROOT
+	GOROOT_FINAL      string      // target GOROOT
 }
 
 // A LineStack is an entry in the recorded line history.
@@ -74,15 +75,15 @@ func (h *LineHist) setFile(stk *LineStack, file string) {
 		abs = filepath.Join(h.Dir, file)
 	}
 
-	// Remove leading TrimPathPrefix, or else rewrite $GOROOT to $GOROOT_FINAL.
+	// Remove leading TrimPathPrefix, or else rewrite $GOROOT to literal $GOROOT.
 	if h.TrimPathPrefix != "" && hasPathPrefix(abs, h.TrimPathPrefix) {
 		if abs == h.TrimPathPrefix {
 			abs = ""
 		} else {
 			abs = abs[len(h.TrimPathPrefix)+1:]
 		}
-	} else if h.GOROOT_FINAL != "" && h.GOROOT_FINAL != h.GOROOT && hasPathPrefix(abs, h.GOROOT) {
-		abs = h.GOROOT_FINAL + abs[len(h.GOROOT):]
+	} else if hasPathPrefix(abs, h.GOROOT) {
+		abs = "$GOROOT" + abs[len(h.GOROOT):]
 	}
 	if abs == "" {
 		abs = "??"
@@ -221,30 +222,32 @@ func (h *LineHist) LineString(lineno int) string {
 		return "<unknown line number>"
 	}
 
-	text := fmt.Sprintf("%s:%d", stk.File, stk.fileLineAt(lineno))
+	filename := stk.File
+	if h.PrintFilenameOnly {
+		filename = filepath.Base(filename)
+	}
+	text := fmt.Sprintf("%s:%d", filename, stk.fileLineAt(lineno))
 	if stk.Directive && stk.Parent != nil {
 		stk = stk.Parent
-		text += fmt.Sprintf("[%s:%d]", stk.File, stk.fileLineAt(lineno))
+		filename = stk.File
+		if h.PrintFilenameOnly {
+			filename = filepath.Base(filename)
+		}
+		text += fmt.Sprintf("[%s:%d]", filename, stk.fileLineAt(lineno))
 	}
 	const showFullStack = false // was used by old C compilers
 	if showFullStack {
 		for stk.Parent != nil {
 			lineno = stk.Lineno - 1
 			stk = stk.Parent
-			text += fmt.Sprintf(" %s:%d", stk.File, stk.fileLineAt(lineno))
+			text += fmt.Sprintf(" %s:%d", filename, stk.fileLineAt(lineno))
 			if stk.Directive && stk.Parent != nil {
 				stk = stk.Parent
-				text += fmt.Sprintf("[%s:%d]", stk.File, stk.fileLineAt(lineno))
+				text += fmt.Sprintf("[%s:%d]", filename, stk.fileLineAt(lineno))
 			}
 		}
 	}
 	return text
-}
-
-// TODO(rsc): Replace call sites with use of ctxt.LineHist.
-// Note that all call sites use showAll=false, showFullPath=false.
-func Linklinefmt(ctxt *Link, lineno int, showAll, showFullPath bool) string {
-	return ctxt.LineHist.LineString(lineno)
 }
 
 // FileLine returns the file name and line number
@@ -288,29 +291,20 @@ func Linkprfile(ctxt *Link, line int) {
 	fmt.Printf("%s ", ctxt.LineHist.LineString(line))
 }
 
-// Linklinehist pushes, amends, or pops an entry on the line history stack.
-// If f != "<pop>" and n == 0, the call pushes the start of a new file named f at lineno.
-// If f != "<pop>" and n > 0, the call amends the top of the stack to record that lineno
-// now corresponds to f at line n.
-// If f == "<pop>", the call pops the topmost entry from the stack, picking up
-// the parent file at the line following the one where the corresponding push occurred.
-//
-// If n < 0, linklinehist records f as a package required by the current compilation
-// (nothing to do with line numbers).
-//
-// TODO(rsc): Replace uses with direct calls to ctxt.Hist methods.
-func Linklinehist(ctxt *Link, lineno int, f string, n int) {
-	switch {
-	case n < 0:
-		ctxt.AddImport(f)
+func fieldtrack(ctxt *Link, cursym *LSym) {
+	p := cursym.Text
+	if p == nil || p.Link == nil { // handle external functions and ELF section symbols
+		return
+	}
+	ctxt.Cursym = cursym
 
-	case f == "<pop>":
-		ctxt.LineHist.Pop(lineno)
-
-	case n == 0:
-		ctxt.LineHist.Push(lineno, f)
-
-	default:
-		ctxt.LineHist.Update(lineno, f, n)
+	for ; p != nil; p = p.Link {
+		if p.As == AUSEFIELD {
+			r := Addrel(ctxt.Cursym)
+			r.Off = 0
+			r.Siz = 0
+			r.Sym = p.From.Sym
+			r.Type = R_USEFIELD
+		}
 	}
 }

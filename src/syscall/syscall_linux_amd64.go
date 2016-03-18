@@ -4,7 +4,10 @@
 
 package syscall
 
-const _SYS_dup = SYS_DUP2
+const (
+	_SYS_dup      = SYS_DUP2
+	_SYS_getdents = SYS_GETDENTS64
+)
 
 //sys	Dup2(oldfd int, newfd int) (err error)
 //sys	Fchown(fd int, uid int, gid int) (err error)
@@ -16,6 +19,7 @@ const _SYS_dup = SYS_DUP2
 //sysnb	Getgid() (gid int)
 //sysnb	Getrlimit(resource int, rlim *Rlimit) (err error)
 //sysnb	Getuid() (uid int)
+//sysnb	InotifyInit() (fd int, err error)
 //sys	Ioperm(from int, num int, on int) (err error)
 //sys	Iopl(level int) (err error)
 //sys	Lchown(path string, uid int, gid int) (err error)

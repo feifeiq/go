@@ -94,6 +94,12 @@ TEXT runtime·usleep(SB),NOSPLIT,$16
 	SYSCALL
 	RET
 
+TEXT runtime·gettid(SB),NOSPLIT,$0-4
+	MOVL	$186, AX	// syscall - gettid
+	SYSCALL
+	MOVL	AX, ret+0(FP)
+	RET
+
 TEXT runtime·raise(SB),NOSPLIT,$0
 	MOVL	$186, AX	// syscall - gettid
 	SYSCALL
@@ -212,37 +218,20 @@ TEXT runtime·rt_sigaction(SB),NOSPLIT,$0-36
 	MOVL	AX, ret+32(FP)
 	RET
 
-TEXT runtime·sigtramp(SB),NOSPLIT,$64
-	get_tls(BX)
-
-	// check that g exists
-	MOVQ	g(BX), R10
-	CMPQ	R10, $0
-	JNE	5(PC)
-	MOVQ	DI, 0(SP)
-	MOVQ	$runtime·badsignal(SB), AX
+TEXT runtime·sigfwd(SB),NOSPLIT,$0-32
+	MOVL	sig+8(FP), DI
+	MOVQ	info+16(FP), SI
+	MOVQ	ctx+24(FP), DX
+	MOVQ	fn+0(FP), AX
 	CALL	AX
 	RET
 
-	// save g
-	MOVQ	R10, 40(SP)
-
-	// g = m->gsignal
-	MOVQ	g_m(R10), AX
-	MOVQ	m_gsignal(AX), AX
-	MOVQ	AX, g(BX)
-
-	MOVQ	DI, 0(SP)
-	MOVQ	SI, 8(SP)
-	MOVQ	DX, 16(SP)
-	MOVQ	R10, 24(SP)
-
-	CALL	runtime·sighandler(SB)
-
-	// restore g
-	get_tls(BX)
-	MOVQ	40(SP), R10
-	MOVQ	R10, g(BX)
+TEXT runtime·sigtramp(SB),NOSPLIT,$24
+	MOVQ	DI, 0(SP)   // signum
+	MOVQ	SI, 8(SP)   // info
+	MOVQ	DX, 16(SP)  // ctx
+	MOVQ	$runtime·sigtrampgo(SB), AX
+	CALL AX
 	RET
 
 TEXT runtime·sigreturn(SB),NOSPLIT,$0
@@ -250,7 +239,7 @@ TEXT runtime·sigreturn(SB),NOSPLIT,$0
 	SYSCALL
 	INT $3	// not reached
 
-TEXT runtime·mmap(SB),NOSPLIT,$0
+TEXT runtime·sysMmap(SB),NOSPLIT,$0
 	MOVQ	addr+0(FP), DI
 	MOVQ	n+8(FP), SI
 	MOVL	prot+16(FP), DX
@@ -264,6 +253,24 @@ TEXT runtime·mmap(SB),NOSPLIT,$0
 	JLS	3(PC)
 	NOTQ	AX
 	INCQ	AX
+	MOVQ	AX, ret+32(FP)
+	RET
+
+// Call the function stored in _cgo_mmap using the GCC calling convention.
+// This must be called on the system stack.
+TEXT runtime·callCgoMmap(SB),NOSPLIT,$16
+	MOVQ	addr+0(FP), DI
+	MOVQ	n+8(FP), SI
+	MOVL	prot+16(FP), DX
+	MOVL	flags+20(FP), CX
+	MOVL	fd+24(FP), R8
+	MOVL	off+28(FP), R9
+	MOVQ	_cgo_mmap(SB), AX
+	MOVQ	SP, BX
+	ANDQ	$~15, SP	// alignment as per amd64 psABI
+	MOVQ	BX, 0(SP)
+	CALL	AX
+	MOVQ	0(SP), SP
 	MOVQ	AX, ret+32(FP)
 	RET
 
@@ -350,7 +357,7 @@ nog:
 	// Call fn
 	CALL	R12
 
-	// It shouldn't return.  If it does, exit that thread.
+	// It shouldn't return. If it does, exit that thread.
 	MOVL	$111, DI
 	MOVL	$60, AX
 	SYSCALL
@@ -368,8 +375,14 @@ TEXT runtime·sigaltstack(SB),NOSPLIT,$-8
 
 // set tls base to DI
 TEXT runtime·settls(SB),NOSPLIT,$32
+#ifdef GOOS_android
+	// Same as in sys_darwin_386.s:/ugliness, different constant.
+	// DI currently holds m->tls, which must be fs:0x1d0.
+	// See cgo/gcc_android_amd64.c for the derivation of the constant.
+	SUBQ	$0x1d0, DI  // In android, the tls base 
+#else
 	ADDQ	$8, DI	// ELF wants to use -8(FS)
-
+#endif
 	MOVQ	DI, SI
 	MOVQ	$0x1002, DI	// ARCH_SET_FS
 	MOVQ	$158, AX	// arch_prctl
@@ -438,4 +451,34 @@ TEXT runtime·closeonexec(SB),NOSPLIT,$0
 	MOVQ    $1, DX  // FD_CLOEXEC
 	MOVL	$72, AX  // fcntl
 	SYSCALL
+	RET
+
+
+// int access(const char *name, int mode)
+TEXT runtime·access(SB),NOSPLIT,$0
+	MOVQ	name+0(FP), DI
+	MOVL	mode+8(FP), SI
+	MOVL	$21, AX  // syscall entry
+	SYSCALL
+	MOVL	AX, ret+16(FP)
+	RET
+
+// int connect(int fd, const struct sockaddr *addr, socklen_t addrlen)
+TEXT runtime·connect(SB),NOSPLIT,$0-28
+	MOVL	fd+0(FP), DI
+	MOVQ	addr+8(FP), SI
+	MOVL	addrlen+16(FP), DX
+	MOVL	$42, AX  // syscall entry
+	SYSCALL
+	MOVL	AX, ret+24(FP)
+	RET
+
+// int socket(int domain, int type, int protocol)
+TEXT runtime·socket(SB),NOSPLIT,$0-20
+	MOVL	domain+0(FP), DI
+	MOVL	type+4(FP), SI
+	MOVL	protocol+8(FP), DX
+	MOVL	$41, AX  // syscall entry
+	SYSCALL
+	MOVL	AX, ret+16(FP)
 	RET

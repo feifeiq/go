@@ -113,7 +113,7 @@ func TestEqualExhaustive(t *testing.T) {
 	}
 }
 
-// make sure Equal returns false for minimally different strings.  The data
+// make sure Equal returns false for minimally different strings. The data
 // is all zeros except for a single one in one location.
 func TestNotEqual(t *testing.T) {
 	var size = 128
@@ -265,6 +265,23 @@ func TestIndexByte(t *testing.T) {
 	}
 }
 
+func TestLastIndexByte(t *testing.T) {
+	testCases := []BinOpTest{
+		{"", "q", -1},
+		{"abcdef", "q", -1},
+		{"abcdefabcdef", "a", len("abcdef")},      // something in the middle
+		{"abcdefabcdef", "f", len("abcdefabcde")}, // last byte
+		{"zabcdefabcdef", "z", 0},                 // first byte
+		{"a☺b☻c☹d", "b", len("a☺")},               // non-ascii
+	}
+	for _, test := range testCases {
+		actual := LastIndexByte([]byte(test.a), test.b[0])
+		if actual != test.i {
+			t.Errorf("LastIndexByte(%q,%c) = %v; want %v", test.a, test.b[0], actual, test.i)
+		}
+	}
+}
+
 // test a larger buffer with different sizes and alignments
 func TestIndexByteBig(t *testing.T) {
 	var n = 1024
@@ -318,6 +335,41 @@ func TestIndexByteBig(t *testing.T) {
 	}
 }
 
+// test a small index across all page offsets
+func TestIndexByteSmall(t *testing.T) {
+	b := make([]byte, 5015) // bigger than a page
+	// Make sure we find the correct byte even when straddling a page.
+	for i := 0; i <= len(b)-15; i++ {
+		for j := 0; j < 15; j++ {
+			b[i+j] = byte(100 + j)
+		}
+		for j := 0; j < 15; j++ {
+			p := IndexByte(b[i:i+15], byte(100+j))
+			if p != j {
+				t.Errorf("IndexByte(%q, %d) = %d", b[i:i+15], 100+j, p)
+			}
+		}
+		for j := 0; j < 15; j++ {
+			b[i+j] = 0
+		}
+	}
+	// Make sure matches outside the slice never trigger.
+	for i := 0; i <= len(b)-15; i++ {
+		for j := 0; j < 15; j++ {
+			b[i+j] = 1
+		}
+		for j := 0; j < 15; j++ {
+			p := IndexByte(b[i:i+15], byte(0))
+			if p != -1 {
+				t.Errorf("IndexByte(%q, %d) = %d", b[i:i+15], 0, p)
+			}
+		}
+		for j := 0; j < 15; j++ {
+			b[i+j] = 0
+		}
+	}
+}
+
 func TestIndexRune(t *testing.T) {
 	for _, tt := range indexRuneTests {
 		a := []byte(tt.a)
@@ -331,10 +383,12 @@ func TestIndexRune(t *testing.T) {
 
 var bmbuf []byte
 
+func BenchmarkIndexByte10(b *testing.B)          { bmIndexByte(b, IndexByte, 10) }
 func BenchmarkIndexByte32(b *testing.B)          { bmIndexByte(b, IndexByte, 32) }
 func BenchmarkIndexByte4K(b *testing.B)          { bmIndexByte(b, IndexByte, 4<<10) }
 func BenchmarkIndexByte4M(b *testing.B)          { bmIndexByte(b, IndexByte, 4<<20) }
 func BenchmarkIndexByte64M(b *testing.B)         { bmIndexByte(b, IndexByte, 64<<20) }
+func BenchmarkIndexBytePortable10(b *testing.B)  { bmIndexByte(b, IndexBytePortable, 10) }
 func BenchmarkIndexBytePortable32(b *testing.B)  { bmIndexByte(b, IndexBytePortable, 32) }
 func BenchmarkIndexBytePortable4K(b *testing.B)  { bmIndexByte(b, IndexBytePortable, 4<<10) }
 func BenchmarkIndexBytePortable4M(b *testing.B)  { bmIndexByte(b, IndexBytePortable, 4<<20) }
@@ -743,7 +797,7 @@ func TestMap(t *testing.T) {
 	// Run a couple of awful growth/shrinkage tests
 	a := tenRunes('a')
 
-	// 1.  Grow.  This triggers two reallocations in Map.
+	// 1.  Grow. This triggers two reallocations in Map.
 	maxRune := func(r rune) rune { return unicode.MaxRune }
 	m := Map(maxRune, []byte(a))
 	expect := tenRunes(unicode.MaxRune)
@@ -1238,3 +1292,34 @@ func BenchmarkRepeat(b *testing.B) {
 		Repeat([]byte("-"), 80)
 	}
 }
+
+func benchmarkBytesCompare(b *testing.B, n int) {
+	var x = make([]byte, n)
+	var y = make([]byte, n)
+
+	for i := 0; i < n; i++ {
+		x[i] = 'a'
+	}
+
+	for i := 0; i < n; i++ {
+		y[i] = 'a'
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		Compare(x, y)
+	}
+}
+
+func BenchmarkBytesCompare1(b *testing.B)    { benchmarkBytesCompare(b, 1) }
+func BenchmarkBytesCompare2(b *testing.B)    { benchmarkBytesCompare(b, 2) }
+func BenchmarkBytesCompare4(b *testing.B)    { benchmarkBytesCompare(b, 4) }
+func BenchmarkBytesCompare8(b *testing.B)    { benchmarkBytesCompare(b, 8) }
+func BenchmarkBytesCompare16(b *testing.B)   { benchmarkBytesCompare(b, 16) }
+func BenchmarkBytesCompare32(b *testing.B)   { benchmarkBytesCompare(b, 32) }
+func BenchmarkBytesCompare64(b *testing.B)   { benchmarkBytesCompare(b, 64) }
+func BenchmarkBytesCompare128(b *testing.B)  { benchmarkBytesCompare(b, 128) }
+func BenchmarkBytesCompare256(b *testing.B)  { benchmarkBytesCompare(b, 256) }
+func BenchmarkBytesCompare512(b *testing.B)  { benchmarkBytesCompare(b, 512) }
+func BenchmarkBytesCompare1024(b *testing.B) { benchmarkBytesCompare(b, 1024) }
+func BenchmarkBytesCompare2048(b *testing.B) { benchmarkBytesCompare(b, 2048) }

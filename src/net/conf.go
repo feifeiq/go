@@ -18,10 +18,14 @@ type conf struct {
 	// forceCgoLookupHost forces CGO to always be used, if available.
 	forceCgoLookupHost bool
 
+	netGo  bool // go DNS resolution forced
+	netCgo bool // cgo DNS resolution forced
+
 	// machine has an /etc/mdns.allow file
 	hasMDNSAllow bool
 
-	goos string // the runtime.GOOS, to ease testing
+	goos          string // the runtime.GOOS, to ease testing
+	dnsDebugLevel int
 
 	nss    *nssConf
 	resolv *dnsConfig
@@ -39,6 +43,28 @@ func systemConf() *conf {
 }
 
 func initConfVal() {
+	dnsMode, debugLevel := goDebugNetDNS()
+	confVal.dnsDebugLevel = debugLevel
+	confVal.netGo = netGo || dnsMode == "go"
+	confVal.netCgo = netCgo || dnsMode == "cgo"
+
+	if confVal.dnsDebugLevel > 0 {
+		defer func() {
+			switch {
+			case confVal.netGo:
+				if netGo {
+					println("go package net: built with netgo build tag; using Go's DNS resolver")
+				} else {
+					println("go package net: GODEBUG setting forcing use of Go's resolver")
+				}
+			case confVal.forceCgoLookupHost:
+				println("go package net: using cgo DNS resolver")
+			default:
+				println("go package net: dynamic selection of DNS resolver")
+			}
+		}()
+	}
+
 	// Darwin pops up annoying dialog boxes if programs try to do
 	// their own DNS requests. So always use cgo instead, which
 	// avoids that.
@@ -51,7 +77,9 @@ func initConfVal() {
 	// force cgo. Note that LOCALDOMAIN can change behavior merely
 	// by being specified with the empty string.
 	_, localDomainDefined := syscall.Getenv("LOCALDOMAIN")
-	if os.Getenv("RES_OPTIONS") != "" || os.Getenv("HOSTALIASES") != "" ||
+	if os.Getenv("RES_OPTIONS") != "" ||
+		os.Getenv("HOSTALIASES") != "" ||
+		confVal.netCgo ||
 		localDomainDefined {
 		confVal.forceCgoLookupHost = true
 		return
@@ -68,9 +96,9 @@ func initConfVal() {
 		confVal.nss = parseNSSConfFile("/etc/nsswitch.conf")
 	}
 
-	if resolv, err := dnsReadConfig("/etc/resolv.conf"); err == nil {
-		confVal.resolv = resolv
-	} else if !os.IsNotExist(err.(*DNSConfigError).Err) {
+	confVal.resolv = dnsReadConfig("/etc/resolv.conf")
+	if confVal.resolv.err != nil && !os.IsNotExist(confVal.resolv.err) &&
+		!os.IsPermission(confVal.resolv.err) {
 		// If we can't read the resolv.conf file, assume it
 		// had something important in it and defer to cgo.
 		// libc's resolver might then fail too, but at least
@@ -83,9 +111,23 @@ func initConfVal() {
 	}
 }
 
+// canUseCgo reports whether calling cgo functions is allowed
+// for non-hostname lookups.
+func (c *conf) canUseCgo() bool {
+	return c.hostLookupOrder("") == hostLookupCgo
+}
+
 // hostLookupOrder determines which strategy to use to resolve hostname.
-func (c *conf) hostLookupOrder(hostname string) hostLookupOrder {
-	if c.forceCgoLookupHost {
+func (c *conf) hostLookupOrder(hostname string) (ret hostLookupOrder) {
+	if c.dnsDebugLevel > 1 {
+		defer func() {
+			print("go package net: hostLookupOrder(", hostname, ") = ", ret.String(), "\n")
+		}()
+	}
+	if c.netGo {
+		return hostLookupFilesDNS
+	}
+	if c.forceCgoLookupHost || c.resolv.unknownOpt || c.goos == "android" {
 		return hostLookupCgo
 	}
 	if byteIndex(hostname, '\\') != -1 || byteIndex(hostname, '%') != -1 {
@@ -100,7 +142,7 @@ func (c *conf) hostLookupOrder(hostname string) hostLookupOrder {
 		// OpenBSD's resolv.conf manpage says that a non-existent
 		// resolv.conf means "lookup" defaults to only "files",
 		// without DNS lookups.
-		if c.resolv == nil {
+		if os.IsNotExist(c.resolv.err) {
 			return hostLookupFiles
 		}
 		lookup := c.resolv.lookup
@@ -135,9 +177,6 @@ func (c *conf) hostLookupOrder(hostname string) hostLookupOrder {
 			return hostLookupCgo
 		}
 	}
-	if c.resolv != nil && c.resolv.unknownOpt {
-		return hostLookupCgo
-	}
 
 	hasDot := byteIndex(hostname, '.') != -1
 
@@ -146,7 +185,7 @@ func (c *conf) hostLookupOrder(hostname string) hostLookupOrder {
 		hostname = hostname[:len(hostname)-1]
 	}
 	if stringsHasSuffixFold(hostname, ".local") {
-		// Per RFC 6762, the ".local" TLD is special.  And
+		// Per RFC 6762, the ".local" TLD is special. And
 		// because Go's native resolver doesn't do mDNS or
 		// similar local resolution mechanisms, assume that
 		// libc might (via Avahi, etc) and use cgo.
@@ -234,4 +273,35 @@ func (c *conf) hostLookupOrder(hostname string) hostLookupOrder {
 
 	// Something weird. Let libc deal with it.
 	return hostLookupCgo
+}
+
+// goDebugNetDNS parses the value of the GODEBUG "netdns" value.
+// The netdns value can be of the form:
+//    1       // debug level 1
+//    2       // debug level 2
+//    cgo     // use cgo for DNS lookups
+//    go      // use go for DNS lookups
+//    cgo+1   // use cgo for DNS lookups + debug level 1
+//    1+cgo   // same
+//    cgo+2   // same, but debug level 2
+// etc.
+func goDebugNetDNS() (dnsMode string, debugLevel int) {
+	goDebug := goDebugString("netdns")
+	parsePart := func(s string) {
+		if s == "" {
+			return
+		}
+		if '0' <= s[0] && s[0] <= '9' {
+			debugLevel, _, _ = dtoi(s, 0)
+		} else {
+			dnsMode = s
+		}
+	}
+	if i := byteIndex(goDebug, '+'); i != -1 {
+		parsePart(goDebug[:i])
+		parsePart(goDebug[i+1:])
+		return
+	}
+	parsePart(goDebug)
+	return
 }

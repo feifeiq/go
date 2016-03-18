@@ -1,4 +1,4 @@
-// Copyright 2015 The Go Authors.  All rights reserved.
+// Copyright 2015 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -15,12 +15,9 @@
 // chance to resolve exceptions before the task handler, so we can generate
 // the panic and avoid lldb's SIGSEGV handler.
 //
-// If you want to debug a segfault under lldb, compile the standard library
-// with the build tag lldb:
-//
-//	go test -tags lldb -installsuffix lldb
+// The dist tool enables this by build flag when testing.
 
-// +build !lldb
+// +build lldb
 // +build darwin
 // +build arm arm64
 

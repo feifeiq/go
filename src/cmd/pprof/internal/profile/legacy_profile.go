@@ -291,7 +291,7 @@ func ParseTracebacks(b []byte) (*Profile, error) {
 		if s, addrs := extractHexAddresses(l); len(s) > 0 {
 			for _, addr := range addrs {
 				// Addresses from stack traces point to the next instruction after
-				// each call.  Adjust by -1 to land somewhere on the actual call
+				// each call. Adjust by -1 to land somewhere on the actual call
 				// (except for the leaf, which is not a call).
 				if len(sloc) > 0 {
 					addr--
@@ -427,7 +427,7 @@ func cpuProfile(b []byte, period int64, parse func(b []byte) (uint64, []byte)) (
 //   3rd word -- 0
 //
 // Addresses from stack traces may point to the next instruction after
-// each call.  Optionally adjust by -1 to land somewhere on the actual
+// each call. Optionally adjust by -1 to land somewhere on the actual
 // call (except for the leaf, which is not a call).
 func parseCPUSamples(b []byte, parse func(b []byte) (uint64, []byte), adjust bool, p *Profile) ([]byte, map[uint64]*Location, error) {
 	locs := make(map[uint64]*Location)
@@ -554,9 +554,10 @@ func parseHeap(b []byte) (p *Profile, err error) {
 			}
 		}
 
-		if l = strings.TrimSpace(l); l == "" {
+		if isSpaceOrComment(l) {
 			continue
 		}
+		l = strings.TrimSpace(l)
 
 		if sectionTrigger(l) != unrecognizedSection {
 			break
@@ -569,7 +570,7 @@ func parseHeap(b []byte) (p *Profile, err error) {
 		var sloc []*Location
 		for i, addr := range addrs {
 			// Addresses from stack traces point to the next instruction after
-			// each call.  Adjust by -1 to land somewhere on the actual call
+			// each call. Adjust by -1 to land somewhere on the actual call
 			// (except for the leaf, which is not a call).
 			if i > 0 {
 				addr--
@@ -588,7 +589,7 @@ func parseHeap(b []byte) (p *Profile, err error) {
 		p.Sample = append(p.Sample, &Sample{
 			Value:    value,
 			Location: sloc,
-			NumLabel: map[string][]int64{"bytes": []int64{blocksize}},
+			NumLabel: map[string][]int64{"bytes": {blocksize}},
 		})
 	}
 
@@ -777,7 +778,7 @@ func parseContention(b []byte) (p *Profile, err error) {
 		var sloc []*Location
 		for i, addr := range addrs {
 			// Addresses from stack traces point to the next instruction after
-			// each call.  Adjust by -1 to land somewhere on the actual call
+			// each call. Adjust by -1 to land somewhere on the actual call
 			// (except for the leaf, which is not a call).
 			if i > 0 {
 				addr--
@@ -920,7 +921,7 @@ func parseThread(b []byte) (*Profile, error) {
 		var sloc []*Location
 		for i, addr := range addrs {
 			// Addresses from stack traces point to the next instruction after
-			// each call.  Adjust by -1 to land somewhere on the actual call
+			// each call. Adjust by -1 to land somewhere on the actual call
 			// (except for the leaf, which is not a call).
 			if i > 0 {
 				addr--

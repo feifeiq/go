@@ -11,25 +11,14 @@ import (
 	"go/importer"
 	"go/parser"
 	"go/token"
-	"runtime"
+	"internal/testenv"
+	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 
 	. "go/types"
 )
-
-// skipSpecialPlatforms causes the test to be skipped for platforms where
-// builders (build.golang.org) don't have access to compiled packages for
-// import.
-func skipSpecialPlatforms(t *testing.T) {
-	switch platform := runtime.GOOS + "-" + runtime.GOARCH; platform {
-	case "nacl-amd64p32",
-		"nacl-386",
-		"darwin-arm",
-		"darwin-arm64":
-		t.Skipf("no compiled packages available for import on %s", platform)
-	}
-}
 
 func pkgFor(path, source string, info *Info) (*Package, error) {
 	fset := token.NewFileSet()
@@ -65,14 +54,14 @@ func TestValuesInfo(t *testing.T) {
 		{`package a1; const _ = 0`, `0`, `untyped int`, `0`},
 		{`package a2; const _ = 'A'`, `'A'`, `untyped rune`, `65`},
 		{`package a3; const _ = 0.`, `0.`, `untyped float`, `0`},
-		{`package a4; const _ = 0i`, `0i`, `untyped complex`, `0`},
+		{`package a4; const _ = 0i`, `0i`, `untyped complex`, `(0 + 0i)`},
 		{`package a5; const _ = "foo"`, `"foo"`, `untyped string`, `"foo"`},
 
 		{`package b0; var _ = false`, `false`, `bool`, `false`},
 		{`package b1; var _ = 0`, `0`, `int`, `0`},
 		{`package b2; var _ = 'A'`, `'A'`, `rune`, `65`},
 		{`package b3; var _ = 0.`, `0.`, `float64`, `0`},
-		{`package b4; var _ = 0i`, `0i`, `complex128`, `0`},
+		{`package b4; var _ = 0i`, `0i`, `complex128`, `(0 + 0i)`},
 		{`package b5; var _ = "foo"`, `"foo"`, `string`, `"foo"`},
 
 		{`package c0a; var _ = bool(false)`, `false`, `bool`, `false`},
@@ -91,9 +80,9 @@ func TestValuesInfo(t *testing.T) {
 		{`package c3b; var _ = float32(0.)`, `float32(0.)`, `float32`, `0`},
 		{`package c3c; type T float32; var _ = T(0.)`, `T(0.)`, `c3c.T`, `0`},
 
-		{`package c4a; var _ = complex64(0i)`, `0i`, `complex64`, `0`},
-		{`package c4b; var _ = complex64(0i)`, `complex64(0i)`, `complex64`, `0`},
-		{`package c4c; type T complex64; var _ = T(0i)`, `T(0i)`, `c4c.T`, `0`},
+		{`package c4a; var _ = complex64(0i)`, `0i`, `complex64`, `(0 + 0i)`},
+		{`package c4b; var _ = complex64(0i)`, `complex64(0i)`, `complex64`, `(0 + 0i)`},
+		{`package c4c; type T complex64; var _ = T(0i)`, `T(0i)`, `c4c.T`, `(0 + 0i)`},
 
 		{`package c5a; var _ = string("foo")`, `"foo"`, `string`, `"foo"`},
 		{`package c5b; var _ = string("foo")`, `string("foo")`, `string`, `"foo"`},
@@ -108,10 +97,10 @@ func TestValuesInfo(t *testing.T) {
 		{`package e1; const _ = float32(-1e-200)`, `float32(-1e-200)`, `float32`, `0`},
 		{`package e2; const _ = float64( 1e-2000)`, `float64(1e-2000)`, `float64`, `0`},
 		{`package e3; const _ = float64(-1e-2000)`, `float64(-1e-2000)`, `float64`, `0`},
-		{`package e4; const _ = complex64( 1e-200)`, `complex64(1e-200)`, `complex64`, `0`},
-		{`package e5; const _ = complex64(-1e-200)`, `complex64(-1e-200)`, `complex64`, `0`},
-		{`package e6; const _ = complex128( 1e-2000)`, `complex128(1e-2000)`, `complex128`, `0`},
-		{`package e7; const _ = complex128(-1e-2000)`, `complex128(-1e-2000)`, `complex128`, `0`},
+		{`package e4; const _ = complex64( 1e-200)`, `complex64(1e-200)`, `complex64`, `(0 + 0i)`},
+		{`package e5; const _ = complex64(-1e-200)`, `complex64(-1e-200)`, `complex64`, `(0 + 0i)`},
+		{`package e6; const _ = complex128( 1e-2000)`, `complex128(1e-2000)`, `complex128`, `(0 + 0i)`},
+		{`package e7; const _ = complex128(-1e-2000)`, `complex128(-1e-2000)`, `complex128`, `(0 + 0i)`},
 
 		{`package f0 ; var _ float32 =  1e-200`, `1e-200`, `float32`, `0`},
 		{`package f1 ; var _ float32 = -1e-200`, `-1e-200`, `float32`, `0`},
@@ -119,12 +108,12 @@ func TestValuesInfo(t *testing.T) {
 		{`package f3a; var _ float64 = -1e-2000`, `-1e-2000`, `float64`, `0`},
 		{`package f2b; var _         =  1e-2000`, `1e-2000`, `float64`, `0`},
 		{`package f3b; var _         = -1e-2000`, `-1e-2000`, `float64`, `0`},
-		{`package f4 ; var _ complex64  =  1e-200 `, `1e-200`, `complex64`, `0`},
-		{`package f5 ; var _ complex64  = -1e-200 `, `-1e-200`, `complex64`, `0`},
-		{`package f6a; var _ complex128 =  1e-2000i`, `1e-2000i`, `complex128`, `0`},
-		{`package f7a; var _ complex128 = -1e-2000i`, `-1e-2000i`, `complex128`, `0`},
-		{`package f6b; var _            =  1e-2000i`, `1e-2000i`, `complex128`, `0`},
-		{`package f7b; var _            = -1e-2000i`, `-1e-2000i`, `complex128`, `0`},
+		{`package f4 ; var _ complex64  =  1e-200 `, `1e-200`, `complex64`, `(0 + 0i)`},
+		{`package f5 ; var _ complex64  = -1e-200 `, `-1e-200`, `complex64`, `(0 + 0i)`},
+		{`package f6a; var _ complex128 =  1e-2000i`, `1e-2000i`, `complex128`, `(0 + 0i)`},
+		{`package f7a; var _ complex128 = -1e-2000i`, `-1e-2000i`, `complex128`, `(0 + 0i)`},
+		{`package f6b; var _            =  1e-2000i`, `1e-2000i`, `complex128`, `(0 + 0i)`},
+		{`package f7b; var _            = -1e-2000i`, `-1e-2000i`, `complex128`, `(0 + 0i)`},
 	}
 
 	for _, test := range tests {
@@ -154,7 +143,7 @@ func TestValuesInfo(t *testing.T) {
 		}
 
 		// check that value is correct
-		if got := tv.Value.String(); got != test.val {
+		if got := tv.Value.ExactString(); got != test.val {
 			t.Errorf("package %s: got value %s; want %s", name, got, test.val)
 		}
 	}
@@ -298,7 +287,7 @@ func predString(tv TypeAndValue) string {
 }
 
 func TestPredicatesInfo(t *testing.T) {
-	skipSpecialPlatforms(t)
+	testenv.MustHaveGoBuild(t)
 
 	var tests = []struct {
 		src  string
@@ -384,7 +373,7 @@ func TestPredicatesInfo(t *testing.T) {
 }
 
 func TestScopesInfo(t *testing.T) {
-	skipSpecialPlatforms(t)
+	testenv.MustHaveGoBuild(t)
 
 	var tests = []struct {
 		src    string
@@ -808,7 +797,7 @@ func main() {
 	makePkg("main", mainSrc)
 
 	for e, sel := range selections {
-		sel.String() // assertion: must not panic
+		_ = sel.String() // assertion: must not panic
 
 		start := fset.Position(e.Pos()).Offset
 		end := fset.Position(e.End()).Offset
@@ -865,7 +854,7 @@ func TestIssue8518(t *testing.T) {
 	}
 
 	const libSrc = `
-package a 
+package a
 import "missing"
 const C1 = foo
 const C2 = missing.C
@@ -954,4 +943,102 @@ func sameSlice(a, b []int) bool {
 		}
 	}
 	return true
+}
+
+// TestScopeLookupParent ensures that (*Scope).LookupParent returns
+// the correct result at various positions with the source.
+func TestScopeLookupParent(t *testing.T) {
+	fset := token.NewFileSet()
+	imports := make(testImporter)
+	conf := Config{Importer: imports}
+	mustParse := func(src string) *ast.File {
+		f, err := parser.ParseFile(fset, "dummy.go", src, parser.ParseComments)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return f
+	}
+	var info Info
+	makePkg := func(path string, files ...*ast.File) {
+		imports[path], _ = conf.Check(path, fset, files, &info)
+	}
+
+	makePkg("lib", mustParse("package lib; var X int"))
+	// Each /*name=kind:line*/ comment makes the test look up the
+	// name at that point and checks that it resolves to a decl of
+	// the specified kind and line number.  "undef" means undefined.
+	mainSrc := `
+package main
+import "lib"
+var Y = lib.X
+func f() {
+	print(Y) /*Y=var:4*/
+	z /*z=undef*/ := /*z=undef*/ 1 /*z=var:7*/
+	print(z)
+	/*f=func:5*/ /*lib=pkgname:3*/
+	type /*T=undef*/ T /*T=typename:10*/ *T
+}
+`
+	info.Uses = make(map[*ast.Ident]Object)
+	f := mustParse(mainSrc)
+	makePkg("main", f)
+	mainScope := imports["main"].Scope()
+	rx := regexp.MustCompile(`^/\*(\w*)=([\w:]*)\*/$`)
+	for _, group := range f.Comments {
+		for _, comment := range group.List {
+			// Parse the assertion in the comment.
+			m := rx.FindStringSubmatch(comment.Text)
+			if m == nil {
+				t.Errorf("%s: bad comment: %s",
+					fset.Position(comment.Pos()), comment.Text)
+				continue
+			}
+			name, want := m[1], m[2]
+
+			// Look up the name in the innermost enclosing scope.
+			inner := mainScope.Innermost(comment.Pos())
+			if inner == nil {
+				t.Errorf("%s: at %s: can't find innermost scope",
+					fset.Position(comment.Pos()), comment.Text)
+				continue
+			}
+			got := "undef"
+			if _, obj := inner.LookupParent(name, comment.Pos()); obj != nil {
+				kind := strings.ToLower(strings.TrimPrefix(reflect.TypeOf(obj).String(), "*types."))
+				got = fmt.Sprintf("%s:%d", kind, fset.Position(obj.Pos()).Line)
+			}
+			if got != want {
+				t.Errorf("%s: at %s: %s resolved to %s, want %s",
+					fset.Position(comment.Pos()), comment.Text, name, got, want)
+			}
+		}
+	}
+
+	// Check that for each referring identifier,
+	// a lookup of its name on the innermost
+	// enclosing scope returns the correct object.
+
+	for id, wantObj := range info.Uses {
+		inner := mainScope.Innermost(id.Pos())
+		if inner == nil {
+			t.Errorf("%s: can't find innermost scope enclosing %q",
+				fset.Position(id.Pos()), id.Name)
+			continue
+		}
+
+		// Exclude selectors and qualified identifiers---lexical
+		// refs only.  (Ideally, we'd see if the AST parent is a
+		// SelectorExpr, but that requires PathEnclosingInterval
+		// from golang.org/x/tools/go/ast/astutil.)
+		if id.Name == "X" {
+			continue
+		}
+
+		_, gotObj := inner.LookupParent(id.Name, id.Pos())
+		if gotObj != wantObj {
+			t.Errorf("%s: got %v, want %v",
+				fset.Position(id.Pos()), gotObj, wantObj)
+			continue
+		}
+	}
 }

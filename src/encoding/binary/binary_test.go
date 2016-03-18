@@ -1,4 +1,4 @@
-// Copyright 2009 The Go Authors.  All rights reserved.
+// Copyright 2009 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -266,7 +266,7 @@ func TestBlankFields(t *testing.T) {
 }
 
 // An attempt to read into a struct with an unexported field will
-// panic.  This is probably not the best choice, but at this point
+// panic. This is probably not the best choice, but at this point
 // anything else would be an API change.
 
 type Unexported struct {
@@ -307,6 +307,36 @@ func TestReadErrorMsg(t *testing.T) {
 	read(&s)
 	p := &s
 	read(&p)
+}
+
+func TestReadTruncated(t *testing.T) {
+	const data = "0123456789abcdef"
+
+	var b1 = make([]int32, 4)
+	var b2 struct {
+		A, B, C, D byte
+		E          int32
+		F          float64
+	}
+
+	for i := 0; i <= len(data); i++ {
+		var errWant error
+		switch i {
+		case 0:
+			errWant = io.EOF
+		case len(data):
+			errWant = nil
+		default:
+			errWant = io.ErrUnexpectedEOF
+		}
+
+		if err := Read(strings.NewReader(data[:i]), LittleEndian, &b1); err != errWant {
+			t.Errorf("Read(%d) with slice: got %v, want %v", i, err, errWant)
+		}
+		if err := Read(strings.NewReader(data[:i]), LittleEndian, &b2); err != errWant {
+			t.Errorf("Read(%d) with struct: got %v, want %v", i, err, errWant)
+		}
+	}
 }
 
 type byteSliceReader struct {

@@ -1,10 +1,13 @@
-// Copyright 2009 The Go Authors.  All rights reserved.
+// Copyright 2009 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
 package net
 
-import "syscall"
+import (
+	"os"
+	"syscall"
+)
 
 func maxListenerBacklog() int {
 	// TODO: Implement this
@@ -20,5 +23,8 @@ func sysSocket(family, sotype, proto int) (syscall.Handle, error) {
 		syscall.CloseOnExec(s)
 	}
 	syscall.ForkLock.RUnlock()
-	return s, err
+	if err != nil {
+		return syscall.InvalidHandle, os.NewSyscallError("socket", err)
+	}
+	return s, nil
 }

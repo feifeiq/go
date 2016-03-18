@@ -35,6 +35,46 @@ The Listen function creates servers:
 		}
 		go handleConnection(conn)
 	}
+
+Name Resolution
+
+The method for resolving domain names, whether indirectly with functions like Dial
+or directly with functions like LookupHost and LookupAddr, varies by operating system.
+
+On Unix systems, the resolver has two options for resolving names.
+It can use a pure Go resolver that sends DNS requests directly to the servers
+listed in /etc/resolv.conf, or it can use a cgo-based resolver that calls C
+library routines such as getaddrinfo and getnameinfo.
+
+By default the pure Go resolver is used, because a blocked DNS request consumes
+only a goroutine, while a blocked C call consumes an operating system thread.
+When cgo is available, the cgo-based resolver is used instead under a variety of
+conditions: on systems that do not let programs make direct DNS requests (OS X),
+when the LOCALDOMAIN environment variable is present (even if empty),
+when the RES_OPTIONS or HOSTALIASES environment variable is non-empty,
+when the ASR_CONFIG environment variable is non-empty (OpenBSD only),
+when /etc/resolv.conf or /etc/nsswitch.conf specify the use of features that the
+Go resolver does not implement, and when the name being looked up ends in .local
+or is an mDNS name.
+
+The resolver decision can be overridden by setting the netdns value of the
+GODEBUG environment variable (see package runtime) to go or cgo, as in:
+
+	export GODEBUG=netdns=go    # force pure Go resolver
+	export GODEBUG=netdns=cgo   # force cgo resolver
+
+The decision can also be forced while building the Go source tree
+by setting the netgo or netcgo build tag.
+
+A numeric netdns setting, as in GODEBUG=netdns=1, causes the resolver
+to print debugging information about its decisions.
+To force a particular resolver while also printing debugging information,
+join the two settings by a plus sign, as in GODEBUG=netdns=go+1.
+
+On Plan 9, the resolver always accesses /net/cs and /net/dns.
+
+On Windows, the resolver always uses C library functions, such as GetAddrInfo and DnsQuery.
+
 */
 package net
 
@@ -44,6 +84,14 @@ import (
 	"os"
 	"syscall"
 	"time"
+)
+
+// netGo and netCgo contain the state of the build tags used
+// to build this binary, and whether cgo is available.
+// conf.go mirrors these into conf for easier testing.
+var (
+	netGo  bool // set true in cgo_stub.go for build tag "netgo" (or no cgo)
+	netCgo bool // set true in conf_netcgo.go for build tag "netcgo"
 )
 
 func init() {
@@ -123,12 +171,7 @@ func (c *conn) Read(b []byte) (int, error) {
 	}
 	n, err := c.fd.Read(b)
 	if err != nil && err != io.EOF {
-		err = &OpError{Op: "read", Net: c.fd.net, Err: err}
-		if c.fd.raddr != nil {
-			err.(*OpError).Addr = c.fd.raddr
-		} else {
-			err.(*OpError).Addr = c.fd.laddr // for unconnected-mode sockets
-		}
+		err = &OpError{Op: "read", Net: c.fd.net, Source: c.fd.laddr, Addr: c.fd.raddr, Err: err}
 	}
 	return n, err
 }
@@ -140,12 +183,7 @@ func (c *conn) Write(b []byte) (int, error) {
 	}
 	n, err := c.fd.Write(b)
 	if err != nil {
-		err = &OpError{Op: "write", Net: c.fd.net, Err: err}
-		if c.fd.raddr != nil {
-			err.(*OpError).Addr = c.fd.raddr
-		} else {
-			err.(*OpError).Addr = c.fd.laddr // for unconnected-mode sockets
-		}
+		err = &OpError{Op: "write", Net: c.fd.net, Source: c.fd.laddr, Addr: c.fd.raddr, Err: err}
 	}
 	return n, err
 }
@@ -157,12 +195,7 @@ func (c *conn) Close() error {
 	}
 	err := c.fd.Close()
 	if err != nil {
-		err = &OpError{Op: "close", Net: c.fd.net, Err: err}
-		if c.fd.raddr != nil {
-			err.(*OpError).Addr = c.fd.raddr
-		} else {
-			err.(*OpError).Addr = c.fd.laddr // for unconnected-mode sockets
-		}
+		err = &OpError{Op: "close", Net: c.fd.net, Source: c.fd.laddr, Addr: c.fd.raddr, Err: err}
 	}
 	return err
 }
@@ -193,7 +226,7 @@ func (c *conn) SetDeadline(t time.Time) error {
 		return syscall.EINVAL
 	}
 	if err := c.fd.setDeadline(t); err != nil {
-		return &OpError{Op: "set", Net: c.fd.net, Addr: c.fd.laddr, Err: err}
+		return &OpError{Op: "set", Net: c.fd.net, Source: nil, Addr: c.fd.laddr, Err: err}
 	}
 	return nil
 }
@@ -204,7 +237,7 @@ func (c *conn) SetReadDeadline(t time.Time) error {
 		return syscall.EINVAL
 	}
 	if err := c.fd.setReadDeadline(t); err != nil {
-		return &OpError{Op: "set", Net: c.fd.net, Addr: c.fd.laddr, Err: err}
+		return &OpError{Op: "set", Net: c.fd.net, Source: nil, Addr: c.fd.laddr, Err: err}
 	}
 	return nil
 }
@@ -215,7 +248,7 @@ func (c *conn) SetWriteDeadline(t time.Time) error {
 		return syscall.EINVAL
 	}
 	if err := c.fd.setWriteDeadline(t); err != nil {
-		return &OpError{Op: "set", Net: c.fd.net, Addr: c.fd.laddr, Err: err}
+		return &OpError{Op: "set", Net: c.fd.net, Source: nil, Addr: c.fd.laddr, Err: err}
 	}
 	return nil
 }
@@ -227,7 +260,7 @@ func (c *conn) SetReadBuffer(bytes int) error {
 		return syscall.EINVAL
 	}
 	if err := setReadBuffer(c.fd, bytes); err != nil {
-		return &OpError{Op: "set", Net: c.fd.net, Addr: c.fd.laddr, Err: err}
+		return &OpError{Op: "set", Net: c.fd.net, Source: nil, Addr: c.fd.laddr, Err: err}
 	}
 	return nil
 }
@@ -239,7 +272,7 @@ func (c *conn) SetWriteBuffer(bytes int) error {
 		return syscall.EINVAL
 	}
 	if err := setWriteBuffer(c.fd, bytes); err != nil {
-		return &OpError{Op: "set", Net: c.fd.net, Addr: c.fd.laddr, Err: err}
+		return &OpError{Op: "set", Net: c.fd.net, Source: nil, Addr: c.fd.laddr, Err: err}
 	}
 	return nil
 }
@@ -254,16 +287,9 @@ func (c *conn) SetWriteBuffer(bytes int) error {
 func (c *conn) File() (f *os.File, err error) {
 	f, err = c.fd.dup()
 	if err != nil {
-		err = &OpError{Op: "file", Net: c.fd.net, Addr: c.fd.laddr, Err: err}
+		err = &OpError{Op: "file", Net: c.fd.net, Source: c.fd.laddr, Addr: c.fd.raddr, Err: err}
 	}
 	return
-}
-
-// An Error represents a network error.
-type Error interface {
-	error
-	Timeout() bool   // Is the error a timeout?
-	Temporary() bool // Is the error temporary?
 }
 
 // PacketConn is a generic packet-oriented network connection.
@@ -271,7 +297,7 @@ type Error interface {
 // Multiple goroutines may invoke methods on a PacketConn simultaneously.
 type PacketConn interface {
 	// ReadFrom reads a packet from the connection,
-	// copying the payload into b.  It returns the number of
+	// copying the payload into b. It returns the number of
 	// bytes copied into b and the return address that
 	// was on the packet.
 	// ReadFrom can be made to time out and return
@@ -319,7 +345,7 @@ var listenerBacklog = maxListenerBacklog()
 // Multiple goroutines may invoke methods on a Listener simultaneously.
 type Listener interface {
 	// Accept waits for and returns the next connection to the listener.
-	Accept() (c Conn, err error)
+	Accept() (Conn, error)
 
 	// Close closes the listener.
 	// Any blocked Accept operations will be unblocked and return errors.
@@ -329,13 +355,24 @@ type Listener interface {
 	Addr() Addr
 }
 
+// An Error represents a network error.
+type Error interface {
+	error
+	Timeout() bool   // Is the error a timeout?
+	Temporary() bool // Is the error temporary?
+}
+
 // Various errors contained in OpError.
 var (
+	// For connection setup operations.
+	errNoSuitableAddress = errors.New("no suitable address found")
+
 	// For connection setup and write operations.
 	errMissingAddress = errors.New("missing address")
 
 	// For both read and write operations.
 	errTimeout          error = &timeoutError{}
+	errCanceled               = errors.New("operation was canceled")
 	errClosing                = errors.New("use of closed network connection")
 	ErrWriteToConnected       = errors.New("use of WriteTo with pre-connected connection")
 )
@@ -352,7 +389,17 @@ type OpError struct {
 	// such as "tcp" or "udp6".
 	Net string
 
-	// Addr is the network address on which this error occurred.
+	// For operations involving a remote network connection, like
+	// Dial, Read, or Write, Source is the corresponding local
+	// network address.
+	Source Addr
+
+	// Addr is the network address for which this error occurred.
+	// For local operations, like Listen or SetDeadline, Addr is
+	// the address of the local endpoint being manipulated.
+	// For operations involving a remote network connection, like
+	// Dial, Read, or Write, Addr is the remote address of that
+	// connection.
 	Addr Addr
 
 	// Err is the error that occurred during the operation.
@@ -367,11 +414,43 @@ func (e *OpError) Error() string {
 	if e.Net != "" {
 		s += " " + e.Net
 	}
+	if e.Source != nil {
+		s += " " + e.Source.String()
+	}
 	if e.Addr != nil {
-		s += " " + e.Addr.String()
+		if e.Source != nil {
+			s += "->"
+		} else {
+			s += " "
+		}
+		s += e.Addr.String()
 	}
 	s += ": " + e.Err.Error()
 	return s
+}
+
+var (
+	// aLongTimeAgo is a non-zero time, far in the past, used for
+	// immediate cancelation of dials.
+	aLongTimeAgo = time.Unix(233431200, 0)
+
+	// nonDeadline and noCancel are just zero values for
+	// readability with functions taking too many parameters.
+	noDeadline = time.Time{}
+	noCancel   = (chan struct{})(nil)
+)
+
+type timeout interface {
+	Timeout() bool
+}
+
+func (e *OpError) Timeout() bool {
+	if ne, ok := e.Err.(*os.SyscallError); ok {
+		t, ok := ne.Err.(timeout)
+		return ok && t.Timeout()
+	}
+	t, ok := e.Err.(timeout)
+	return ok && t.Timeout()
 }
 
 type temporary interface {
@@ -379,19 +458,12 @@ type temporary interface {
 }
 
 func (e *OpError) Temporary() bool {
+	if ne, ok := e.Err.(*os.SyscallError); ok {
+		t, ok := ne.Err.(temporary)
+		return ok && t.Temporary()
+	}
 	t, ok := e.Err.(temporary)
 	return ok && t.Temporary()
-}
-
-var noDeadline = time.Time{}
-
-type timeout interface {
-	Timeout() bool
-}
-
-func (e *OpError) Timeout() bool {
-	t, ok := e.Err.(timeout)
-	return ok && t.Timeout()
 }
 
 type timeoutError struct{}
@@ -399,6 +471,18 @@ type timeoutError struct{}
 func (e *timeoutError) Error() string   { return "i/o timeout" }
 func (e *timeoutError) Timeout() bool   { return true }
 func (e *timeoutError) Temporary() bool { return true }
+
+// A ParseError is the error type of literal network address parsers.
+type ParseError struct {
+	// Type is the type of string that was expected, such as
+	// "IP address", "CIDR address".
+	Type string
+
+	// Text is the malformed text string.
+	Text string
+}
+
+func (e *ParseError) Error() string { return "invalid " + e.Type + ": " + e.Text }
 
 type AddrError struct {
 	Err  string
@@ -416,14 +500,14 @@ func (e *AddrError) Error() string {
 	return s
 }
 
-func (e *AddrError) Temporary() bool { return false }
 func (e *AddrError) Timeout() bool   { return false }
+func (e *AddrError) Temporary() bool { return false }
 
 type UnknownNetworkError string
 
 func (e UnknownNetworkError) Error() string   { return "unknown network " + string(e) }
-func (e UnknownNetworkError) Temporary() bool { return false }
 func (e UnknownNetworkError) Timeout() bool   { return false }
+func (e UnknownNetworkError) Temporary() bool { return false }
 
 type InvalidAddrError string
 
@@ -432,6 +516,7 @@ func (e InvalidAddrError) Timeout() bool   { return false }
 func (e InvalidAddrError) Temporary() bool { return false }
 
 // DNSConfigError represents an error reading the machine's DNS configuration.
+// (No longer used; kept for compatibility.)
 type DNSConfigError struct {
 	Err error
 }
@@ -447,10 +532,11 @@ var (
 
 // DNSError represents a DNS lookup error.
 type DNSError struct {
-	Err       string // description of the error
-	Name      string // name looked for
-	Server    string // server used
-	IsTimeout bool   // if true, timed out; not all timeouts set this
+	Err         string // description of the error
+	Name        string // name looked for
+	Server      string // server used
+	IsTimeout   bool   // if true, timed out; not all timeouts set this
+	IsTemporary bool   // if true, error is temporary; not all errors set this
 }
 
 func (e *DNSError) Error() string {
@@ -473,7 +559,7 @@ func (e *DNSError) Timeout() bool { return e.IsTimeout }
 // Temporary reports whether the DNS error is known to be temporary.
 // This is not always known; a DNS lookup may fail due to a temporary
 // error and return a DNSError for which Temporary returns false.
-func (e *DNSError) Temporary() bool { return e.IsTimeout }
+func (e *DNSError) Temporary() bool { return e.IsTimeout || e.IsTemporary }
 
 type writerOnly struct {
 	io.Writer

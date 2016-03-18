@@ -1,4 +1,4 @@
-// Copyright 2009 The Go Authors.  All rights reserved.
+// Copyright 2009 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -77,7 +77,7 @@ func (fd *netFD) destroy() {
 // Add a reference to this fd.
 // Returns an error if the fd cannot be used.
 func (fd *netFD) incref() error {
-	if !fd.fdmu.Incref() {
+	if !fd.fdmu.incref() {
 		return errClosing
 	}
 	return nil
@@ -86,7 +86,7 @@ func (fd *netFD) incref() error {
 // Remove a reference to this FD and close if we've been asked to do so
 // (and there are no references left).
 func (fd *netFD) decref() {
-	if fd.fdmu.Decref() {
+	if fd.fdmu.decref() {
 		fd.destroy()
 	}
 }
@@ -94,7 +94,7 @@ func (fd *netFD) decref() {
 // Add a reference to this fd and lock for reading.
 // Returns an error if the fd cannot be used.
 func (fd *netFD) readLock() error {
-	if !fd.fdmu.RWLock(true) {
+	if !fd.fdmu.rwlock(true) {
 		return errClosing
 	}
 	return nil
@@ -102,7 +102,7 @@ func (fd *netFD) readLock() error {
 
 // Unlock for reading and remove a reference to this FD.
 func (fd *netFD) readUnlock() {
-	if fd.fdmu.RWUnlock(true) {
+	if fd.fdmu.rwunlock(true) {
 		fd.destroy()
 	}
 }
@@ -110,7 +110,7 @@ func (fd *netFD) readUnlock() {
 // Add a reference to this fd and lock for writing.
 // Returns an error if the fd cannot be used.
 func (fd *netFD) writeLock() error {
-	if !fd.fdmu.RWLock(false) {
+	if !fd.fdmu.rwlock(false) {
 		return errClosing
 	}
 	return nil
@@ -118,7 +118,7 @@ func (fd *netFD) writeLock() error {
 
 // Unlock for writing and remove a reference to this FD.
 func (fd *netFD) writeUnlock() {
-	if fd.fdmu.RWUnlock(false) {
+	if fd.fdmu.rwunlock(false) {
 		fd.destroy()
 	}
 }
@@ -165,11 +165,19 @@ func (fd *netFD) closeWrite() error {
 }
 
 func (fd *netFD) Close() error {
-	if !fd.fdmu.IncrefAndClose() {
+	if !fd.fdmu.increfAndClose() {
 		return errClosing
 	}
 	if !fd.ok() {
 		return syscall.EINVAL
+	}
+	if fd.net == "tcp" {
+		// The following line is required to unblock Reads.
+		// For some reason, WriteString returns an error:
+		// "write /net/tcp/39/listen: inappropriate use of fd"
+		// But without it, Reads on dead conns hang forever.
+		// See Issue 9554.
+		fd.ctl.WriteString("hangup")
 	}
 	err := fd.ctl.Close()
 	if fd.data != nil {
@@ -202,7 +210,7 @@ func (fd *netFD) file(f *os.File, s string) (*os.File, error) {
 	dfd, err := syscall.Dup(int(f.Fd()), -1)
 	syscall.ForkLock.RUnlock()
 	if err != nil {
-		return nil, err
+		return nil, os.NewSyscallError("dup", err)
 	}
 	return os.NewFile(uintptr(dfd), s), nil
 }

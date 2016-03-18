@@ -1,4 +1,4 @@
-// Copyright 2014 The Go Authors.  All rights reserved.
+// Copyright 2014 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -27,7 +27,7 @@ func main() {
 	for i := uint(2); i <= 4; i++ {
 		for j := 1; j < 1<<i; j++ {
 			fmt.Printf("\n//go:nosplit\n")
-			fmt.Printf("func writebarrierfat%0*b(dst *[%d]uintptr, _ *byte, src [%d]uintptr) {\n", int(i), j, i, i)
+			fmt.Printf("func writebarrierfat%0*b(dst *[%d]uintptr, _ uintptr, src [%d]uintptr) {\n", int(i), j, i, i)
 			for k := uint(0); k < i; k++ {
 				if j&(1<<(i-1-k)) != 0 {
 					fmt.Printf("\twritebarrierptr(&dst[%d], src[%d])\n", k, k)

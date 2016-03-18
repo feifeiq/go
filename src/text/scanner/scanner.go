@@ -4,25 +4,14 @@
 
 // Package scanner provides a scanner and tokenizer for UTF-8-encoded text.
 // It takes an io.Reader providing the source, which then can be tokenized
-// through repeated calls to the Scan function.  For compatibility with
+// through repeated calls to the Scan function. For compatibility with
 // existing tools, the NUL character is not allowed. If the first character
 // in the source is a UTF-8 encoded byte order mark (BOM), it is discarded.
 //
 // By default, a Scanner skips white space and Go comments and recognizes all
-// literals as defined by the Go language specification.  It may be
+// literals as defined by the Go language specification. It may be
 // customized to recognize only a subset of those literals and to recognize
 // different identifier and white space characters.
-//
-// Basic usage pattern:
-//
-//	var s scanner.Scanner
-//	s.Init(src)
-//	tok := s.Scan()
-//	for tok != scanner.EOF {
-//		// do something with tok
-//		tok = s.Scan()
-//	}
-//
 package scanner
 
 import (
@@ -84,7 +73,7 @@ const (
 	GoTokens       = ScanIdents | ScanFloats | ScanChars | ScanStrings | ScanRawStrings | ScanComments | SkipComments
 )
 
-// The result of Scan is one of the following tokens or a Unicode character.
+// The result of Scan is one of these tokens or a Unicode character.
 const (
 	EOF = -(iota + 1)
 	Ident
@@ -314,7 +303,9 @@ func (s *Scanner) Next() rune {
 	s.tokPos = -1 // don't collect token text
 	s.Line = 0    // invalidate token position
 	ch := s.Peek()
-	s.ch = s.next()
+	if ch != EOF {
+		s.ch = s.next()
+	}
 	return ch
 }
 
@@ -342,7 +333,7 @@ func (s *Scanner) error(msg string) {
 	if !pos.IsValid() {
 		pos = s.Pos()
 	}
-	fmt.Fprintf(os.Stderr, "%s: %s\n", pos, msg)
+	fmt.Fprintf(os.Stderr, "text/scanner: %s: %s\n", pos, msg)
 }
 
 func (s *Scanner) isIdentRune(ch rune, i int) bool {
@@ -597,6 +588,8 @@ redo:
 		}
 	default:
 		switch ch {
+		case EOF:
+			break
 		case '"':
 			if s.Mode&ScanStrings != 0 {
 				s.scanString('"')

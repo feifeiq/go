@@ -1,4 +1,4 @@
-// Copyright 2015 The Go Authors.  All rights reserved.
+// Copyright 2015 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -11,7 +11,6 @@ import (
 	"io"
 	"log"
 	"os"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -28,12 +27,10 @@ func Cputime() float64 {
 }
 
 type Biobuf struct {
-	unget    [2]int
-	numUnget int
-	f        *os.File
-	r        *bufio.Reader
-	w        *bufio.Writer
-	linelen  int
+	f       *os.File
+	r       *bufio.Reader
+	w       *bufio.Writer
+	linelen int
 }
 
 func Bopenw(name string) (*Biobuf, error) {
@@ -54,6 +51,10 @@ func Bopenr(name string) (*Biobuf, error) {
 
 func Binitw(w io.Writer) *Biobuf {
 	return &Biobuf{w: bufio.NewWriter(w)}
+}
+
+func Binitr(r io.Reader) *Biobuf {
+	return &Biobuf{r: bufio.NewReader(r)}
 }
 
 func (b *Biobuf) Write(p []byte) (int, error) {
@@ -85,22 +86,23 @@ func Bseek(b *Biobuf, offset int64, whence int) int64 {
 }
 
 func Boffset(b *Biobuf) int64 {
-	if err := b.w.Flush(); err != nil {
-		log.Fatalf("writing output: %v", err)
+	if b.w != nil {
+		if err := b.w.Flush(); err != nil {
+			log.Fatalf("writing output: %v", err)
+		}
 	}
 	off, err := b.f.Seek(0, 1)
 	if err != nil {
-		log.Fatalf("seeking in output: %v", err)
+		log.Fatalf("seeking in output [0, 1]: %v", err)
+	}
+	if b.r != nil {
+		off -= int64(b.r.Buffered())
 	}
 	return off
 }
 
 func (b *Biobuf) Flush() error {
 	return b.w.Flush()
-}
-
-func Bwrite(b *Biobuf, p []byte) (int, error) {
-	return b.w.Write(p)
 }
 
 func Bputc(b *Biobuf, c byte) {
@@ -120,34 +122,19 @@ func Bread(b *Biobuf, p []byte) int {
 }
 
 func Bgetc(b *Biobuf) int {
-	if b.numUnget > 0 {
-		b.numUnget--
-		return int(b.unget[b.numUnget])
-	}
 	c, err := b.r.ReadByte()
-	r := int(c)
-	if err != nil {
-		r = -1
-	}
-	b.unget[1] = b.unget[0]
-	b.unget[0] = r
-	return r
-}
-
-func Bgetrune(b *Biobuf) int {
-	r, _, err := b.r.ReadRune()
 	if err != nil {
 		return -1
 	}
-	return int(r)
-}
-
-func Bungetrune(b *Biobuf) {
-	b.r.UnreadRune()
+	return int(c)
 }
 
 func (b *Biobuf) Read(p []byte) (int, error) {
 	return b.r.Read(p)
+}
+
+func (b *Biobuf) Peek(n int) ([]byte, error) {
+	return b.r.Peek(n)
 }
 
 func Brdline(b *Biobuf, delim int) string {
@@ -159,38 +146,8 @@ func Brdline(b *Biobuf, delim int) string {
 	return string(s)
 }
 
-func Brdstr(b *Biobuf, delim int, cut int) string {
-	s, err := b.r.ReadString(byte(delim))
-	if err != nil {
-		log.Fatalf("reading input: %v", err)
-	}
-	if len(s) > 0 && cut > 0 {
-		s = s[:len(s)-1]
-	}
-	return s
-}
-
-func Access(name string, mode int) int {
-	if mode != 0 {
-		panic("bad access")
-	}
-	_, err := os.Stat(name)
-	if err != nil {
-		return -1
-	}
-	return 0
-}
-
 func Blinelen(b *Biobuf) int {
 	return b.linelen
-}
-
-func Bungetc(b *Biobuf) {
-	b.numUnget++
-}
-
-func Bflush(b *Biobuf) error {
-	return b.w.Flush()
 }
 
 func Bterm(b *Biobuf) error {
@@ -224,11 +181,22 @@ func Getgoos() string {
 	return envOr("GOOS", defaultGOOS)
 }
 
-func Getgoarm() string {
-	return envOr("GOARM", defaultGOARM)
+func Getgoarm() int32 {
+	switch v := envOr("GOARM", defaultGOARM); v {
+	case "5":
+		return 5
+	case "6":
+		return 6
+	case "7":
+		return 7
+	}
+	// Fail here, rather than validate at multiple call sites.
+	log.Fatalf("Invalid GOARM value. Must be 5, 6, or 7.")
+	panic("unreachable")
 }
 
 func Getgo386() string {
+	// Validated by cmd/compile.
 	return envOr("GO386", defaultGO386)
 }
 
@@ -240,13 +208,8 @@ func Getgoversion() string {
 	return version
 }
 
-func Atoi(s string) int {
-	i, _ := strconv.Atoi(s)
-	return i
-}
-
 func (p *Prog) Line() string {
-	return Linklinefmt(p.Ctxt, int(p.Lineno), false, false)
+	return p.Ctxt.LineHist.LineString(int(p.Lineno))
 }
 
 var armCondCode = []string{
@@ -301,6 +264,10 @@ func CConv(s uint8) string {
 }
 
 func (p *Prog) String() string {
+	if p == nil {
+		return "<nil Prog>"
+	}
+
 	if p.Ctxt == nil {
 		return "<Prog without ctxt>"
 	}
@@ -309,7 +276,7 @@ func (p *Prog) String() string {
 
 	var buf bytes.Buffer
 
-	fmt.Fprintf(&buf, "%.5d (%v)\t%v%s", p.Pc, p.Line(), Aconv(int(p.As)), sc)
+	fmt.Fprintf(&buf, "%.5d (%v)\t%v%s", p.Pc, p.Line(), Aconv(p.As), sc)
 	sep := "\t"
 	if p.From.Type != TYPE_NONE {
 		fmt.Fprintf(&buf, "%s%v", sep, Dconv(p, &p.From))
@@ -320,32 +287,45 @@ func (p *Prog) String() string {
 		fmt.Fprintf(&buf, "%s%v", sep, Rconv(int(p.Reg)))
 		sep = ", "
 	}
-	if p.From3.Type != TYPE_NONE {
-		if p.From3.Type == TYPE_CONST && (p.As == ADATA || p.As == ATEXT || p.As == AGLOBL) {
+	if p.From3Type() != TYPE_NONE {
+		if p.From3.Type == TYPE_CONST && (p.As == ATEXT || p.As == AGLOBL) {
 			// Special case - omit $.
 			fmt.Fprintf(&buf, "%s%d", sep, p.From3.Offset)
 		} else {
-			fmt.Fprintf(&buf, "%s%v", sep, Dconv(p, &p.From3))
+			fmt.Fprintf(&buf, "%s%v", sep, Dconv(p, p.From3))
 		}
 		sep = ", "
 	}
 	if p.To.Type != TYPE_NONE {
 		fmt.Fprintf(&buf, "%s%v", sep, Dconv(p, &p.To))
 	}
-	if p.To2.Type != TYPE_NONE {
-		fmt.Fprintf(&buf, "%s%v", sep, Dconv(p, &p.To2))
+	if p.RegTo2 != REG_NONE {
+		fmt.Fprintf(&buf, "%s%v", sep, Rconv(int(p.RegTo2)))
 	}
 	return buf.String()
 }
 
 func (ctxt *Link) NewProg() *Prog {
-	p := new(Prog) // should be the only call to this; all others should use ctxt.NewProg
+	var p *Prog
+	if i := ctxt.allocIdx; i < len(ctxt.progs) {
+		p = &ctxt.progs[i]
+		ctxt.allocIdx = i + 1
+	} else {
+		p = new(Prog) // should be the only call to this; all others should use ctxt.NewProg
+	}
 	p.Ctxt = ctxt
 	return p
 }
+func (ctxt *Link) freeProgs() {
+	s := ctxt.progs[:ctxt.allocIdx]
+	for i := range s {
+		s[i] = Prog{}
+	}
+	ctxt.allocIdx = 0
+}
 
 func (ctxt *Link) Line(n int) string {
-	return Linklinefmt(ctxt, n, false, false)
+	return ctxt.LineHist.LineString(n)
 }
 
 func Getcallerpc(interface{}) uintptr {
@@ -380,7 +360,7 @@ func Dconv(p *Prog, a *Addr) string {
 		}
 
 		str = Rconv(int(a.Reg))
-		if a.Name != TYPE_NONE || a.Sym != nil {
+		if a.Name != NAME_NONE || a.Sym != nil {
 			str = fmt.Sprintf("%v(%v)(REG)", Mconv(a), Rconv(int(a.Reg)))
 		}
 
@@ -402,6 +382,9 @@ func Dconv(p *Prog, a *Addr) string {
 		str = Mconv(a)
 		if a.Index != REG_NONE {
 			str += fmt.Sprintf("(%v*%d)", Rconv(int(a.Index)), int(a.Scale))
+		}
+		if p != nil && p.As == ATYPE && a.Gotype != nil {
+			str += fmt.Sprintf("%s", a.Gotype.Name)
 		}
 
 	case TYPE_CONST:
@@ -475,13 +458,25 @@ func Mconv(a *Addr) string {
 		}
 
 	case NAME_EXTERN:
-		str = fmt.Sprintf("%s%s(SB)", a.Sym.Name, offConv(a.Offset))
+		if a.Sym != nil {
+			str = fmt.Sprintf("%s%s(SB)", a.Sym.Name, offConv(a.Offset))
+		} else {
+			str = fmt.Sprintf("%s(SB)", offConv(a.Offset))
+		}
 
 	case NAME_GOTREF:
-		str = fmt.Sprintf("%s%s@GOT(SB)", a.Sym.Name, offConv(a.Offset))
+		if a.Sym != nil {
+			str = fmt.Sprintf("%s%s@GOT(SB)", a.Sym.Name, offConv(a.Offset))
+		} else {
+			str = fmt.Sprintf("%s@GOT(SB)", offConv(a.Offset))
+		}
 
 	case NAME_STATIC:
-		str = fmt.Sprintf("%s<>%s(SB)", a.Sym.Name, offConv(a.Offset))
+		if a.Sym != nil {
+			str = fmt.Sprintf("%s<>%s(SB)", a.Sym.Name, offConv(a.Offset))
+		} else {
+			str = fmt.Sprintf("<>%s(SB)", offConv(a.Offset))
+		}
 
 	case NAME_AUTO:
 		if a.Sym != nil {
@@ -526,15 +521,16 @@ var regSpace []regSet
 const (
 	// Because of masking operations in the encodings, each register
 	// space should start at 0 modulo some power of 2.
-	RBase386   = 1 * 1024
-	RBaseAMD64 = 2 * 1024
-	RBaseARM   = 3 * 1024
-	RBasePPC64 = 4 * 1024 // range [4k, 8k)
-	RBaseARM64 = 8 * 1024 // range [8k, 12k)
+	RBase386    = 1 * 1024
+	RBaseAMD64  = 2 * 1024
+	RBaseARM    = 3 * 1024
+	RBasePPC64  = 4 * 1024  // range [4k, 8k)
+	RBaseARM64  = 8 * 1024  // range [8k, 13k)
+	RBaseMIPS64 = 13 * 1024 // range [13k, 14k)
 )
 
 // RegisterRegister binds a pretty-printer (Rconv) for register
-// numbers to a given register number range.  Lo is inclusive,
+// numbers to a given register number range. Lo is inclusive,
 // hi exclusive (valid registers are lo through hi-1).
 func RegisterRegister(lo, hi int, Rconv func(int) string) {
 	regSpace = append(regSpace, regSet{lo, hi, Rconv})
@@ -576,25 +572,8 @@ func regListConv(list int) string {
 	return str
 }
 
-/*
-	Each architecture defines an instruction (A*) space as a unique
-	integer range.
-	Global opcodes like CALL start at 0; the architecture-specific ones
-	start at a distinct, big-maskable offsets.
-	Here is the list of architectures and the base of their opcode spaces.
-*/
-
-const (
-	ABase386 = (1 + iota) << 12
-	ABaseARM
-	ABaseAMD64
-	ABasePPC64
-	ABaseARM64
-	AMask = 1<<12 - 1 // AND with this to use the opcode as an array index.
-)
-
 type opSet struct {
-	lo    int
+	lo    As
 	names []string
 }
 
@@ -603,17 +582,17 @@ var aSpace []opSet
 
 // RegisterOpcode binds a list of instruction names
 // to a given instruction number range.
-func RegisterOpcode(lo int, Anames []string) {
+func RegisterOpcode(lo As, Anames []string) {
 	aSpace = append(aSpace, opSet{lo, Anames})
 }
 
-func Aconv(a int) string {
-	if a < A_ARCHSPECIFIC {
+func Aconv(a As) string {
+	if 0 <= a && int(a) < len(Anames) {
 		return Anames[a]
 	}
 	for i := range aSpace {
 		as := &aSpace[i]
-		if as.lo <= a && a < as.lo+len(as.names) {
+		if as.lo <= a && int(a-as.lo) < len(as.names) {
 			return as.names[a-as.lo]
 		}
 	}
@@ -624,7 +603,6 @@ var Anames = []string{
 	"XXX",
 	"CALL",
 	"CHECKNIL",
-	"DATA",
 	"DUFFCOPY",
 	"DUFFZERO",
 	"END",
@@ -640,6 +618,7 @@ var Anames = []string{
 	"USEFIELD",
 	"VARDEF",
 	"VARKILL",
+	"VARLIVE",
 }
 
 func Bool2int(b bool) int {

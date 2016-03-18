@@ -1,4 +1,4 @@
-// Copyright 2009 The Go Authors.  All rights reserved.
+// Copyright 2009 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -193,8 +193,7 @@ func formToClass(form format, attr Attr, vers int, b *buf) Class {
 		if class, ok := attrPtrClass[attr]; ok {
 			return class
 		}
-		b.error("cannot determine class of unknown attribute with formSecOffset")
-		return 0
+		return ClassUnknown
 
 	case formExprloc:
 		return ClassExprLoc
@@ -235,13 +234,16 @@ type Entry struct {
 //    loclistptr        int64          ClassLocListPtr
 //    macptr            int64          ClassMacPtr
 //    rangelistptr      int64          ClassRangeListPtr
+//
+// For unrecognized or vendor-defined attributes, Class may be
+// ClassUnknown.
 type Field struct {
 	Attr  Attr
 	Val   interface{}
 	Class Class
 }
 
-// A Class is the DWARF 4 class of an attibute value.
+// A Class is the DWARF 4 class of an attribute value.
 //
 // In general, a given attribute's value may take on one of several
 // possible classes defined by DWARF, each of which leads to a
@@ -258,9 +260,12 @@ type Field struct {
 type Class int
 
 const (
+	// ClassUnknown represents values of unknown DWARF class.
+	ClassUnknown Class = iota
+
 	// ClassAddress represents values of type uint64 that are
 	// addresses on the target machine.
-	ClassAddress Class = 1 + iota
+	ClassAddress
 
 	// ClassBlock represents values of type []byte whose
 	// interpretation depends on the attribute.
@@ -282,7 +287,7 @@ const (
 	// into the "line" section.
 	ClassLinePtr
 
-	// ClassLocListPtr repersents values that are an int64 offset
+	// ClassLocListPtr represents values that are an int64 offset
 	// into the "loclist" section.
 	ClassLocListPtr
 
@@ -501,7 +506,7 @@ func (b *buf) entry(atab abbrevTable, ubase Offset) *Entry {
 }
 
 // A Reader allows reading Entry structures from a DWARF ``info'' section.
-// The Entry structures are arranged in a tree.  The Reader's Next function
+// The Entry structures are arranged in a tree. The Reader's Next function
 // return successive entries from a pre-order traversal of the tree.
 // If an entry has children, its Children field will be true, and the children
 // follow, terminated by an Entry with Tag 0.
@@ -520,6 +525,12 @@ func (d *Data) Reader() *Reader {
 	r := &Reader{d: d}
 	r.Seek(0)
 	return r
+}
+
+// AddressSize returns the size in bytes of addresses in the current compilation
+// unit.
+func (r *Reader) AddressSize() int {
+	return r.d.unit[r.unit].asize
 }
 
 // Seek positions the Reader at offset off in the encoded entry stream.
@@ -541,6 +552,7 @@ func (r *Reader) Seek(off Offset) {
 	i := d.offsetToUnit(off)
 	if i == -1 {
 		r.err = errors.New("offset out of range")
+		return
 	}
 	u := &d.unit[i]
 	r.unit = i
@@ -586,7 +598,7 @@ func (r *Reader) Next() (*Entry, error) {
 }
 
 // SkipChildren skips over the child entries associated with
-// the last Entry returned by Next.  If that Entry did not have
+// the last Entry returned by Next. If that Entry did not have
 // children or Next has not been called, SkipChildren is a no-op.
 func (r *Reader) SkipChildren() {
 	if r.err != nil || !r.lastChildren {
@@ -613,13 +625,13 @@ func (r *Reader) SkipChildren() {
 	}
 }
 
-// clone returns a copy of the reader.  This is used by the typeReader
+// clone returns a copy of the reader. This is used by the typeReader
 // interface.
 func (r *Reader) clone() typeReader {
 	return r.d.Reader()
 }
 
-// offset returns the current buffer offset.  This is used by the
+// offset returns the current buffer offset. This is used by the
 // typeReader interface.
 func (r *Reader) offset() Offset {
 	return r.b.off

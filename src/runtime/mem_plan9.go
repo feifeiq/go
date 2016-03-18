@@ -1,4 +1,4 @@
-// Copyright 2010 The Go Authors.  All rights reserved.
+// Copyright 2010 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -12,16 +12,21 @@ var bloc uintptr
 var memlock mutex
 
 type memHdr struct {
-	next *memHdr
+	next memHdrPtr
 	size uintptr
 }
 
-var memFreelist *memHdr // sorted in ascending order
+var memFreelist memHdrPtr // sorted in ascending order
+
+type memHdrPtr uintptr
+
+func (p memHdrPtr) ptr() *memHdr   { return (*memHdr)(unsafe.Pointer(p)) }
+func (p *memHdrPtr) set(x *memHdr) { *p = memHdrPtr(unsafe.Pointer(x)) }
 
 func memAlloc(n uintptr) unsafe.Pointer {
 	n = memRound(n)
 	var prevp *memHdr
-	for p := memFreelist; p != nil; p = p.next {
+	for p := memFreelist.ptr(); p != nil; p = p.next.ptr() {
 		if p.size >= n {
 			if p.size == n {
 				if prevp != nil {
@@ -47,31 +52,31 @@ func memFree(ap unsafe.Pointer, n uintptr) {
 	bp := (*memHdr)(ap)
 	bp.size = n
 	bpn := uintptr(ap)
-	if memFreelist == nil {
-		bp.next = nil
-		memFreelist = bp
+	if memFreelist == 0 {
+		bp.next = 0
+		memFreelist.set(bp)
 		return
 	}
-	p := memFreelist
+	p := memFreelist.ptr()
 	if bpn < uintptr(unsafe.Pointer(p)) {
-		memFreelist = bp
+		memFreelist.set(bp)
 		if bpn+bp.size == uintptr(unsafe.Pointer(p)) {
 			bp.size += p.size
 			bp.next = p.next
 			memclr(unsafe.Pointer(p), unsafe.Sizeof(memHdr{}))
 		} else {
-			bp.next = p
+			bp.next.set(p)
 		}
 		return
 	}
-	for ; p.next != nil; p = p.next {
+	for ; p.next != 0; p = p.next.ptr() {
 		if bpn > uintptr(unsafe.Pointer(p)) && bpn < uintptr(unsafe.Pointer(p.next)) {
 			break
 		}
 	}
 	if bpn+bp.size == uintptr(unsafe.Pointer(p.next)) {
-		bp.size += p.next.size
-		bp.next = p.next.next
+		bp.size += p.next.ptr().size
+		bp.next = p.next.ptr().next
 		memclr(unsafe.Pointer(p.next), unsafe.Sizeof(memHdr{}))
 	} else {
 		bp.next = p.next
@@ -81,7 +86,7 @@ func memFree(ap unsafe.Pointer, n uintptr) {
 		p.next = bp.next
 		memclr(unsafe.Pointer(bp), unsafe.Sizeof(memHdr{}))
 	} else {
-		p.next = bp
+		p.next.set(bp)
 	}
 }
 
@@ -89,7 +94,7 @@ func memCheck() {
 	if memDebug == false {
 		return
 	}
-	for p := memFreelist; p != nil && p.next != nil; p = p.next {
+	for p := memFreelist.ptr(); p != nil && p.next != 0; p = p.next.ptr() {
 		if uintptr(unsafe.Pointer(p)) == uintptr(unsafe.Pointer(p.next)) {
 			print("runtime: ", unsafe.Pointer(p), " == ", unsafe.Pointer(p.next), "\n")
 			throw("mem: infinite loop")
@@ -130,19 +135,19 @@ func sbrk(n uintptr) unsafe.Pointer {
 	return unsafe.Pointer(bl)
 }
 
-func sysAlloc(n uintptr, stat *uint64) unsafe.Pointer {
+func sysAlloc(n uintptr, sysStat *uint64) unsafe.Pointer {
 	lock(&memlock)
 	p := memAlloc(n)
 	memCheck()
 	unlock(&memlock)
 	if p != nil {
-		xadd64(stat, int64(n))
+		mSysStatInc(sysStat, n)
 	}
 	return p
 }
 
-func sysFree(v unsafe.Pointer, n uintptr, stat *uint64) {
-	xadd64(stat, -int64(n))
+func sysFree(v unsafe.Pointer, n uintptr, sysStat *uint64) {
+	mSysStatDec(sysStat, n)
 	lock(&memlock)
 	memFree(v, n)
 	memCheck()
@@ -155,10 +160,10 @@ func sysUnused(v unsafe.Pointer, n uintptr) {
 func sysUsed(v unsafe.Pointer, n uintptr) {
 }
 
-func sysMap(v unsafe.Pointer, n uintptr, reserved bool, stat *uint64) {
+func sysMap(v unsafe.Pointer, n uintptr, reserved bool, sysStat *uint64) {
 	// sysReserve has already allocated all heap memory,
 	// but has not adjusted stats.
-	xadd64(stat, int64(n))
+	mSysStatInc(sysStat, n)
 }
 
 func sysFault(v unsafe.Pointer, n uintptr) {

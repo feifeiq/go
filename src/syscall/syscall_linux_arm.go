@@ -6,7 +6,10 @@ package syscall
 
 import "unsafe"
 
-const _SYS_dup = SYS_DUP2
+const (
+	_SYS_dup      = SYS_DUP2
+	_SYS_getdents = SYS_GETDENTS64
+)
 
 func Getpagesize() int { return 4096 }
 
@@ -87,6 +90,7 @@ func Seek(fd int, offset int64, whence int) (newoffset int64, err error) {
 //sysnb	Geteuid() (euid int) = SYS_GETEUID32
 //sysnb	Getgid() (gid int) = SYS_GETGID32
 //sysnb	Getuid() (uid int) = SYS_GETUID32
+//sysnb	InotifyInit() (fd int, err error)
 //sys	Lchown(path string, uid int, gid int) (err error) = SYS_LCHOWN32
 //sys	Listen(s int, n int) (err error)
 //sys	Lstat(path string, stat *Stat_t) (err error) = SYS_LSTAT64

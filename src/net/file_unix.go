@@ -11,68 +11,56 @@ import (
 	"syscall"
 )
 
+func dupSocket(f *os.File) (int, error) {
+	s, err := dupCloseOnExec(int(f.Fd()))
+	if err != nil {
+		return -1, err
+	}
+	if err := syscall.SetNonblock(s, true); err != nil {
+		closeFunc(s)
+		return -1, os.NewSyscallError("setnonblock", err)
+	}
+	return s, nil
+}
+
 func newFileFD(f *os.File) (*netFD, error) {
-	fd, err := dupCloseOnExec(int(f.Fd()))
+	s, err := dupSocket(f)
 	if err != nil {
 		return nil, err
 	}
-
-	if err = syscall.SetNonblock(fd, true); err != nil {
-		closeFunc(fd)
-		return nil, err
-	}
-
-	sotype, err := syscall.GetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_TYPE)
-	if err != nil {
-		closeFunc(fd)
-		return nil, err
-	}
-
 	family := syscall.AF_UNSPEC
-	toAddr := sockaddrToTCP
-	lsa, _ := syscall.Getsockname(fd)
+	sotype, err := syscall.GetsockoptInt(s, syscall.SOL_SOCKET, syscall.SO_TYPE)
+	if err != nil {
+		closeFunc(s)
+		return nil, os.NewSyscallError("getsockopt", err)
+	}
+	lsa, _ := syscall.Getsockname(s)
+	rsa, _ := syscall.Getpeername(s)
 	switch lsa.(type) {
 	case *syscall.SockaddrInet4:
 		family = syscall.AF_INET
-		if sotype == syscall.SOCK_DGRAM {
-			toAddr = sockaddrToUDP
-		} else if sotype == syscall.SOCK_RAW {
-			toAddr = sockaddrToIP
-		}
 	case *syscall.SockaddrInet6:
 		family = syscall.AF_INET6
-		if sotype == syscall.SOCK_DGRAM {
-			toAddr = sockaddrToUDP
-		} else if sotype == syscall.SOCK_RAW {
-			toAddr = sockaddrToIP
-		}
 	case *syscall.SockaddrUnix:
 		family = syscall.AF_UNIX
-		toAddr = sockaddrToUnix
-		if sotype == syscall.SOCK_DGRAM {
-			toAddr = sockaddrToUnixgram
-		} else if sotype == syscall.SOCK_SEQPACKET {
-			toAddr = sockaddrToUnixpacket
-		}
 	default:
-		closeFunc(fd)
+		closeFunc(s)
 		return nil, syscall.EPROTONOSUPPORT
 	}
-	laddr := toAddr(lsa)
-	rsa, _ := syscall.Getpeername(fd)
-	raddr := toAddr(rsa)
-
-	netfd, err := newFD(fd, family, sotype, laddr.Network())
+	fd, err := newFD(s, family, sotype, "")
 	if err != nil {
-		closeFunc(fd)
+		closeFunc(s)
 		return nil, err
 	}
-	if err := netfd.init(); err != nil {
-		netfd.Close()
+	laddr := fd.addrFunc()(lsa)
+	raddr := fd.addrFunc()(rsa)
+	fd.net = laddr.Network()
+	if err := fd.init(); err != nil {
+		fd.Close()
 		return nil, err
 	}
-	netfd.setAddr(laddr, raddr)
-	return netfd, nil
+	fd.setAddr(laddr, raddr)
+	return fd, nil
 }
 
 func fileConn(f *os.File) (Conn, error) {
@@ -103,7 +91,7 @@ func fileListener(f *os.File) (Listener, error) {
 	case *TCPAddr:
 		return &TCPListener{fd}, nil
 	case *UnixAddr:
-		return &UnixListener{fd, laddr.Name}, nil
+		return &UnixListener{fd: fd, path: laddr.Name, unlink: false}, nil
 	}
 	fd.Close()
 	return nil, syscall.EINVAL

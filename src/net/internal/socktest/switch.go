@@ -10,12 +10,6 @@ import (
 	"sync"
 )
 
-func switchInit(sw *Switch) {
-	sw.fltab = make(map[FilterType]Filter)
-	sw.sotab = make(Sockets)
-	sw.stats = make(stats)
-}
-
 // A Switch represents a callpath point switch for socket system
 // calls.
 type Switch struct {
@@ -27,6 +21,12 @@ type Switch struct {
 	smu   sync.RWMutex
 	sotab Sockets
 	stats stats
+}
+
+func (sw *Switch) init() {
+	sw.fltab = make(map[FilterType]Filter)
+	sw.sotab = make(Sockets)
+	sw.stats = make(stats)
 }
 
 // Stats returns a list of per-cookie socket statistics.
@@ -77,7 +77,7 @@ type Status struct {
 }
 
 func (so Status) String() string {
-	return fmt.Sprintf("(%s, %s, %s): syscallerr=%v, socketerr=%v", familyString(so.Cookie.Family()), typeString(so.Cookie.Type()), protocolString(so.Cookie.Protocol()), so.Err, so.SocketErr)
+	return fmt.Sprintf("(%s, %s, %s): syscallerr=%v socketerr=%v", familyString(so.Cookie.Family()), typeString(so.Cookie.Type()), protocolString(so.Cookie.Protocol()), so.Err, so.SocketErr)
 }
 
 // A Stat represents a per-cookie socket statistics.
@@ -100,7 +100,7 @@ type Stat struct {
 }
 
 func (st Stat) String() string {
-	return fmt.Sprintf("(%s, %s, %s): opened=%d, connected=%d, listened=%d, accepted=%d, closed=%d, openfailed=%d, connectfailed=%d, listenfailed=%d, acceptfailed=%d, closefailed=%d", familyString(st.Family), typeString(st.Type), protocolString(st.Protocol), st.Opened, st.Connected, st.Listened, st.Accepted, st.Closed, st.OpenFailed, st.ConnectFailed, st.ListenFailed, st.AcceptFailed, st.CloseFailed)
+	return fmt.Sprintf("(%s, %s, %s): opened=%d connected=%d listened=%d accepted=%d closed=%d openfailed=%d connectfailed=%d listenfailed=%d acceptfailed=%d closefailed=%d", familyString(st.Family), typeString(st.Type), protocolString(st.Protocol), st.Opened, st.Connected, st.Listened, st.Accepted, st.Closed, st.OpenFailed, st.ConnectFailed, st.ListenFailed, st.AcceptFailed, st.CloseFailed)
 }
 
 type stats map[Cookie]*Stat
@@ -121,7 +121,7 @@ const (
 	FilterSocket        FilterType = iota // for Socket
 	FilterConnect                         // for Connect or ConnectEx
 	FilterListen                          // for Listen
-	FilterAccept                          // for Accept or Accept4
+	FilterAccept                          // for Accept, Accept4 or AcceptEx
 	FilterGetsockoptInt                   // for GetsockoptInt
 	FilterClose                           // for Close or Closesocket
 )
@@ -162,7 +162,7 @@ func (f AfterFilter) apply(st *Status) error {
 
 // Set deploys the socket system call filter f for the filter type t.
 func (sw *Switch) Set(t FilterType, f Filter) {
-	sw.once.Do(func() { switchInit(sw) })
+	sw.once.Do(sw.init)
 	sw.fmu.Lock()
 	sw.fltab[t] = f
 	sw.fmu.Unlock()

@@ -1,4 +1,4 @@
-// Copyright 2012 The Go Authors.  All rights reserved.
+// Copyright 2012 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -47,10 +47,6 @@ func mkEnv() []envVar {
 
 		// disable escape codes in clang errors
 		{"TERM", "dumb"},
-	}
-
-	if archCharErr == nil {
-		env = append(env, envVar{"GOCHAR", archChar()})
 	}
 
 	if goos != "plan9" {
